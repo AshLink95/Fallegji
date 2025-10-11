@@ -1,0 +1,18 @@
+[package]
+name = "Fallegji"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+boringtun = "0.6.0"
+chacha20poly1305 = "0.10.1"
+ratatui = "0.29.0"
+tokio = {version = "1.47.1", features = ["full"]}
+zeromq = {version = "0.4.1", features = ["tokio-runtime"]}
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1
