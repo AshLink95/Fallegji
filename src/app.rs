@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::Text,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 
@@ -36,7 +36,6 @@ macro_rules! input_handling {
                         }
                     },
                     KeyCode::Enter => {
-                        println!("\n\n\n'{}'\n\n\n", $input);
                         $input.clear();
                         $cursor_pos = 0;
                     },
@@ -153,34 +152,48 @@ macro_rules! chat {
     ($terminal:ident, $vim_mode: ident, $input:ident, $cursor_pos:ident, $curr_screen: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
-
-            // Split layout: main area + 3-line input box at bottom
+            let box_width = size.width.saturating_sub(2);
+            
+            // Split input into lines
+            let lines: Vec<String> = if $input.is_empty() {
+                vec![String::new()]
+            } else {
+                $input.chars()
+                    .collect::<Vec<_>>()
+                    .chunks(box_width as usize)
+                    .map(|chunk| chunk.iter().collect())
+                    .collect()
+            };
+            
+            let line_count = (lines.len() as u16 + 2).min(7); // caps at 5
+            
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(1), // main area
-                    Constraint::Length(3), // input box
+                    Constraint::Min(1),
+                    Constraint::Length(line_count),
                 ])
                 .split(size);
-
-            // Input box
+            
             let mode = match $vim_mode {
                 Vim::Normal => "NORMAL",
                 Vim::Insert => "INSERT",
                 Vim::Visual => "VISUAL",
             };
-
-            let input_box = Paragraph::new(Text::raw(&$input))
+            
+            // Join lines with newlines
+            let display_text = lines.join("\n");
+            
+            let input_box = Paragraph::new(display_text)
                 .block(Block::default().borders(Borders::ALL)
-                    .title(format!(" {} ({}) ", "Input", mode))
-                    )
-                .style(Style::default().fg(Color::White))
-                .wrap(Wrap { trim: true });
-
+                    .title(format!(" {} ({}) ", "Input", mode)))
+                .style(Style::default().fg(Color::White));
+            
             // Cursor position
-            let cursor_x = chunks[1].x + 1 + $cursor_pos as u16;
-            let cursor_y = chunks[1].y + 1;
-
+            let box_width = chunks[1].width.saturating_sub(2);
+            let cursor_x = chunks[1].x + 1 + ($cursor_pos as u16 % box_width);
+            let cursor_y = chunks[1].y + 1 + ($cursor_pos as u16 / box_width);
+            
             f.render_widget(input_box, chunks[1]);
             f.set_cursor_position((cursor_x, cursor_y));
         })?;
