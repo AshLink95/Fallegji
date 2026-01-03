@@ -8,6 +8,15 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 <!-- Connection Types (P2P and group chats) -->
 
+# basic VIM motions checklist:
+- [ ] Numbers
+- [ ] delete and change
+- [ ] Displaying numbers, g, c and d (compounds)
+- [ ] replace and replace mode
+- [ ] Visual mode
+- [ ] Macros (might be a stretch)
+
+
 # Onboarding Menu
 This is a screen users are greated with, which prompts them to choose their name, preferred tunnel ip range among other options like vim motions, colorscheme and layout. Note that these configurable settings are saved in `.config/fallegji`.
 

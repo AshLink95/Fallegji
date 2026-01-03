@@ -21,7 +21,7 @@ use anyhow::Result;
 enum Vim { Normal, Insert, Visual }
 macro_rules! input_handling {
     ($vim_mode: ident, $input:ident, $cursor_pos:ident) => {
-        //TODO: include a count variable and a g variable for 'ge', maybe also a mechanism that allows : commands
+        //TODO: include a count variable and a g variable for 'ge', a c variable for 'cc' and 'cn-hjkl', same for d
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
@@ -47,11 +47,40 @@ macro_rules! input_handling {
                     KeyCode::Char('l') if $vim_mode == Vim::Normal => {
                         if $cursor_pos < $input.len()-1 { $cursor_pos += 1; };
                     },
+                    KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='0' || s=='^' || s=='_') => {
+                        $cursor_pos = 0;
+                    },
                     KeyCode::Char('$') if $vim_mode == Vim::Normal => {
                         $cursor_pos = $input.len() - 1;
                     },
-                    KeyCode::Char('0') if $vim_mode == Vim::Normal => {
-                        $cursor_pos = 0;
+                    KeyCode::Char(w) if $vim_mode == Vim::Normal && (w=='w' || w=='W') => {
+                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
+                    },
+                    KeyCode::Char(b) if $vim_mode == Vim::Normal && (b=='b' || b=='B') => {
+                        if $cursor_pos > 0 { $cursor_pos -= 1; }
+                        while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos -= 1;
+                        }
+                        while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos -= 1;
+                        }
+                        if $cursor_pos > 0 { $cursor_pos += 1; }
+                    },
+                    KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
+                        if $cursor_pos < $input.len() { $cursor_pos += 1; }
+                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        if $cursor_pos > 0 { $cursor_pos -= 1; }
                     },
                     KeyCode::Char('i') if $vim_mode == Vim::Normal => {
                         $vim_mode = Vim::Insert;
@@ -72,35 +101,7 @@ macro_rules! input_handling {
                         $vim_mode = Vim::Insert;
                         execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
-                    KeyCode::Char('w') if $vim_mode == Vim::Normal => {
-                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos += 1;
-                        }
-                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos += 1;
-                        }
-                        $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
-                    },
-                    KeyCode::Char('b') if $vim_mode == Vim::Normal => {
-                        if $cursor_pos > 0 { $cursor_pos -= 1; }
-                        while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos -= 1;
-                        }
-                        while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos -= 1;
-                        }
-                        if $cursor_pos > 0 { $cursor_pos += 1; }
-                    },
-                    KeyCode::Char('e') if $vim_mode == Vim::Normal => {
-                        if $cursor_pos < $input.len() { $cursor_pos += 1; }
-                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos += 1;
-                        }
-                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                            $cursor_pos += 1;
-                        }
-                        if $cursor_pos > 0 { $cursor_pos -= 1; }
-                    },
+                    //TODO next: delete and change
 
                     // INSERT mode handling
                     KeyCode::Backspace if $vim_mode == Vim::Insert => {
