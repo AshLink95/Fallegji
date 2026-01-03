@@ -4,6 +4,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    cursor::SetCursorStyle,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -20,6 +21,7 @@ use anyhow::Result;
 enum Vim { Normal, Insert, Visual }
 macro_rules! input_handling {
     ($vim_mode: ident, $input:ident, $cursor_pos:ident) => {
+        //TODO: include a count variable and a g variable for 'ge', maybe also a mechanism that allows : commands
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
@@ -43,14 +45,61 @@ macro_rules! input_handling {
                         $cursor_pos = $cursor_pos.saturating_sub(1);
                     },
                     KeyCode::Char('l') if $vim_mode == Vim::Normal => {
-                        if $cursor_pos < $input.len() { $cursor_pos += 1; };
+                        if $cursor_pos < $input.len()-1 { $cursor_pos += 1; };
+                    },
+                    KeyCode::Char('$') if $vim_mode == Vim::Normal => {
+                        $cursor_pos = $input.len() - 1;
+                    },
+                    KeyCode::Char('0') if $vim_mode == Vim::Normal => {
+                        $cursor_pos = 0;
                     },
                     KeyCode::Char('i') if $vim_mode == Vim::Normal => {
                         $vim_mode = Vim::Insert;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                    },
+                    KeyCode::Char('I') if $vim_mode == Vim::Normal => {
+                        $cursor_pos = 0;
+                        $vim_mode = Vim::Insert;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
                     KeyCode::Char('a') if $vim_mode == Vim::Normal => {
                         if $cursor_pos < $input.len() { $cursor_pos += 1; };
                         $vim_mode = Vim::Insert;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                    },
+                    KeyCode::Char('A') if $vim_mode == Vim::Normal => {
+                        $cursor_pos = $input.len();
+                        $vim_mode = Vim::Insert;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                    },
+                    KeyCode::Char('w') if $vim_mode == Vim::Normal => {
+                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
+                    },
+                    KeyCode::Char('b') if $vim_mode == Vim::Normal => {
+                        if $cursor_pos > 0 { $cursor_pos -= 1; }
+                        while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos -= 1;
+                        }
+                        while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos -= 1;
+                        }
+                        if $cursor_pos > 0 { $cursor_pos += 1; }
+                    },
+                    KeyCode::Char('e') if $vim_mode == Vim::Normal => {
+                        if $cursor_pos < $input.len() { $cursor_pos += 1; }
+                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        if $cursor_pos > 0 { $cursor_pos -= 1; }
                     },
 
                     // INSERT mode handling
@@ -61,7 +110,9 @@ macro_rules! input_handling {
                         }
                     },
                     KeyCode::Esc if $vim_mode == Vim::Insert => {
+                        if $cursor_pos == $input.len() { $cursor_pos -= 1; };
                         $vim_mode = Vim::Normal;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                     },
                     KeyCode::Char(c) if $vim_mode == Vim::Insert => {
                         $input.insert($cursor_pos, c);
@@ -96,7 +147,7 @@ macro_rules! initClient {
     };
 }
 
-macro_rules! client {
+macro_rules! chat {
     ($terminal:ident, $vim_mode: ident, $input:ident, $cursor_pos:ident, $curr_screen: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
@@ -119,7 +170,7 @@ macro_rules! client {
 
             let input_box = Paragraph::new(Text::raw(&$input))
                 .block(Block::default().borders(Borders::ALL)
-                    .title(format!("{} ({}) ", "Input", mode))
+                    .title(format!(" {} ({}) ", "Input", mode))
                     )
                 .style(Style::default().fg(Color::White))
                 .wrap(Wrap { trim: true });
@@ -149,8 +200,9 @@ pub fn app() -> Result<()> {
     let mut input = String::new();
     let mut cursor_pos: usize = 0;
 
-    let mut curr_screen = Screen::Chat; //dbg: should start with Onboarding
+    let curr_screen = Screen::Chat; //dbg: should be mut and init to Onboarding
 
+    #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Onboarding {
             onboarding!(terminal, vim_mode, input, cursor_pos, curr_screen);
@@ -159,7 +211,7 @@ pub fn app() -> Result<()> {
         } else if curr_screen == Screen::InitClient {
             initClient!(terminal, vim_mode, input, cursor_pos, curr_screen);
         } else if curr_screen == Screen::Chat {
-            client!(terminal, vim_mode, input, cursor_pos, curr_screen);
+            chat!(terminal, vim_mode, input, cursor_pos, curr_screen);
         }
     }
 
