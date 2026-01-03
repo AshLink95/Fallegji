@@ -47,11 +47,21 @@ macro_rules! input_handling {
                     KeyCode::Char('l') if $vim_mode == Vim::Normal => {
                         if $cursor_pos < $input.len()-1 { $cursor_pos += 1; };
                     },
-                    KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='0' || s=='^' || s=='_') => {
+                    KeyCode::Char('0') if $vim_mode == Vim::Normal => {
                         $cursor_pos = 0;
                     },
                     KeyCode::Char('$') if $vim_mode == Vim::Normal => {
                         $cursor_pos = $input.len() - 1;
+                    },
+                    KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='^' || s=='_') => {
+                        $cursor_pos = 0;
+                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                            $cursor_pos += 1;
+                        }
+                        $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
                     },
                     KeyCode::Char(w) if $vim_mode == Vim::Normal && (w=='w' || w=='W') => {
                         while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
