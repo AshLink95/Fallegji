@@ -36,6 +36,7 @@ macro_rules! input_handling {
                         }
                     },
                     KeyCode::Enter => {
+                        println!("\n\n\n'{}'\n\n\n", $input);
                         $input.clear();
                         $cursor_pos = 0;
                     },
@@ -111,7 +112,7 @@ macro_rules! input_handling {
                         }
                     },
                     KeyCode::Esc if $vim_mode == Vim::Insert => {
-                        if $cursor_pos == $input.len() { $cursor_pos -= 1; };
+                        if $cursor_pos == $input.len() { $cursor_pos = $cursor_pos.saturating_sub(1); };
                         $vim_mode = Vim::Normal;
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                     },
