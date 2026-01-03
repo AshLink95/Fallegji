@@ -10,7 +10,6 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::Text,
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
@@ -18,7 +17,7 @@ use ratatui::{
 use anyhow::Result;
 
 #[derive(PartialEq, Eq)]
-enum Vim { Normal, Insert, Visual }
+enum Vim { Normal, Insert, }
 macro_rules! input_handling {
     ($vim_mode: ident, $input:ident, $cursor_pos:ident) => {
         //TODO: include a count variable and a g variable for 'ge', a c variable for 'cc' and 'cn-hjkl', same for d
@@ -188,16 +187,18 @@ macro_rules! chat {
             let mode = match $vim_mode {
                 Vim::Normal => "NORMAL",
                 Vim::Insert => "INSERT",
-                Vim::Visual => "VISUAL",
             };
             
             // Join lines with newlines
             let display_text = lines.join("\n");
             
             let input_box = Paragraph::new(display_text)
-                .block(Block::default().borders(Borders::ALL)
-                    .title(format!(" {} ({}) ", "Input", mode)))
-                .style(Style::default().fg(Color::White));
+                .block(
+                    Block::default().borders(Borders::ALL)
+                        .title(format!(" {} ({}) ", "Input", mode))
+                        .style(Style::default().fg(Color::White)) // box style
+                )
+                .style(Style::default().fg(Color::White)); // text style
             
             // Cursor position
             let box_width = chunks[1].width.saturating_sub(2);
