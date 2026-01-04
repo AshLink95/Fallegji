@@ -13,6 +13,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [x] Sequence (Numbers and compounds)
 - [x] delete and change
 - [ ] Implement `iw`, `i(` and such sequences
+- [ ] Implement `f` and `F`
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] Macros (might be a stretch)

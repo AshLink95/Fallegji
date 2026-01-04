@@ -279,7 +279,7 @@ macro_rules! input_handling {
                         
                         while n>0 {
                             match k {
-                                Some("g") => {
+                                Some("g") | Some("dg") | Some("cg") => {
                                     if $cursor_pos > 0 { $cursor_pos -= 1; }
                                     while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
                                         $cursor_pos -= 1;
@@ -305,24 +305,20 @@ macro_rules! input_handling {
                             }
                             n = n.saturating_sub(1);
                         }
-                        
+
+                        let (left, right) = if start < $cursor_pos {
+                            (start, $cursor_pos + 1)
+                        } else {
+                            ($cursor_pos, start + 1)
+                        };
+
                         match k {
-                            Some("d") | Some("gd") => {
-                                let (left, right) = if start < $cursor_pos {
-                                    (start, $cursor_pos + 1)
-                                } else {
-                                    ($cursor_pos, start)
-                                };
+                            Some("d") | Some("dg") => {
                                 $input.drain(left..right);
                                 $cursor_pos = left;
                                 $seq.clear();
                             },
-                            Some("c") | Some("gc") => {
-                                let (left, right) = if start < $cursor_pos {
-                                    (start, $cursor_pos + 1)
-                                } else {
-                                    ($cursor_pos, start)
-                                };
+                            Some("c") | Some("cg") => {
                                 $input.drain(left..right);
                                 $cursor_pos = left;
                                 $vim_mode = Vim::Insert;
@@ -374,8 +370,6 @@ macro_rules! input_handling {
                                 $cursor_pos = n.saturating_sub(1);
                                 $seq.clear();
                             },
-                            Some("d") => { $seq.clear(); },
-                            Some("c") => { $seq.clear(); },
                             _ => { $seq.push('g'); }
                         }
                     },
