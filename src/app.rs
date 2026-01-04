@@ -77,40 +77,103 @@ macro_rules! input_handling {
                     },
 
                     // NORMAL mode handling
-                    KeyCode::Char('0') if $seq.is_empty() && $vim_mode == Vim::Normal => {
+                    KeyCode::Char('0') if n==0 && $vim_mode == Vim::Normal => {
+                        let start = $cursor_pos;
                         $cursor_pos = 0;
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain($cursor_pos..start);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain($cursor_pos..start);
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => {}
+                        }
                     },
                     KeyCode::Char(n) if n.is_ascii_digit() && $vim_mode == Vim::Normal => {
                         $seq.push(n);
                     }
                     KeyCode::Esc if $vim_mode == Vim::Normal => { $seq.clear() },
-                    //TODO: implement delete and change in h and l, w, b, e and ge (reimplement the logic with s and x)
                     KeyCode::Char('h') if $vim_mode == Vim::Normal => {
-                        if n==0 { n+=1 };
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
                         while n>0 {
                             $cursor_pos = $cursor_pos.saturating_sub(1);
                             n = n.saturating_sub(1);
                         }
-                        $seq.clear();
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain($cursor_pos..start);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain($cursor_pos..start);
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char('l') if $vim_mode == Vim::Normal => {
-                        if n==0 { n+=1 };
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
                         while n>0 {
                             if $cursor_pos < $input.len().saturating_sub(1) {
                                 $cursor_pos += 1;
                             };
                             n = n.saturating_sub(1);
                         }
-                        $seq.clear();
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain(start..$cursor_pos);
+                                $cursor_pos = start;
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain(start..$cursor_pos);
+                                $cursor_pos = start;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char('$') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
+                        let start = $cursor_pos;
                         $cursor_pos = $input.len().saturating_sub(1);
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain(start..($cursor_pos + 1));
+                                $cursor_pos = start.saturating_sub(1);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain(start..($cursor_pos + 1));
+                                $cursor_pos = start;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='^' || s=='_') => {
+                        let start = $cursor_pos;
+                        
                         match $input.chars().nth(0) {
                             Some(' ') => {
-                                $seq.clear();
                                 $cursor_pos = 0;
                                 while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
                                     $cursor_pos += 1;
@@ -122,9 +185,37 @@ macro_rules! input_handling {
                             },
                             _ => { $cursor_pos = 0; }
                         }
+                        
+                        match k {
+                            Some("d") => {
+                                let (left, right) = if start < $cursor_pos {
+                                    (start, $cursor_pos)
+                                } else {
+                                    ($cursor_pos, start)
+                                };
+                                $input.drain(left..right);
+                                $cursor_pos = left;
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                let (left, right) = if start < $cursor_pos {
+                                    (start, $cursor_pos)
+                                } else {
+                                    ($cursor_pos, start)
+                                };
+                                $input.drain(left..right);
+                                $cursor_pos = left;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char(w) if $vim_mode == Vim::Normal && (w=='w' || w=='W') => {
-                        if n==0 { n+=1 };
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
                         while n>0 {
                             while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
                                 $cursor_pos += 1;
@@ -135,10 +226,27 @@ macro_rules! input_handling {
                             $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
                             n = n.saturating_sub(1);
                         }
-                        $seq.clear();
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain(start..$cursor_pos);
+                                $cursor_pos = start;
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain(start..$cursor_pos);
+                                $cursor_pos = start;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char(b) if $vim_mode == Vim::Normal && (b=='b' || b=='B') => {
-                        if n==0 { n+=1 };
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
                         while n>0 {
                             if $cursor_pos > 0 { $cursor_pos -= 1; }
                             while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
@@ -150,10 +258,25 @@ macro_rules! input_handling {
                             if $cursor_pos > 0 { $cursor_pos += 1; }
                             n = n.saturating_sub(1);
                         }
-                        $seq.clear();
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain($cursor_pos..start);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain($cursor_pos..start);
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
-                        if n==0 { n+=1 };
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
                         while n>0 {
                             match k {
                                 Some("g") => {
@@ -182,7 +305,32 @@ macro_rules! input_handling {
                             }
                             n = n.saturating_sub(1);
                         }
-                        $seq.clear();
+                        
+                        match k {
+                            Some("d") | Some("gd") => {
+                                let (left, right) = if start < $cursor_pos {
+                                    (start, $cursor_pos + 1)
+                                } else {
+                                    ($cursor_pos, start)
+                                };
+                                $input.drain(left..right);
+                                $cursor_pos = left;
+                                $seq.clear();
+                            },
+                            Some("c") | Some("gc") => {
+                                let (left, right) = if start < $cursor_pos {
+                                    (start, $cursor_pos + 1)
+                                } else {
+                                    ($cursor_pos, start)
+                                };
+                                $input.drain(left..right);
+                                $cursor_pos = left;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
                     },
                     KeyCode::Char('i') if $vim_mode == Vim::Normal => {
                         $seq.clear();
