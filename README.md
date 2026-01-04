@@ -8,17 +8,14 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 <!-- Connection Types (P2P and group chats) -->
 
-# basic VIM motions checklist:
-- [x] Displaying numbers, g, c and d (compounds)
-- [x] Sequence (Numbers and compounds)
-- [x] delete and change
-- [ ] Implement `iw`, `i(` and such sequences
+# advanced VIM motions checklist:
+- [ ] Implement `iw`, `i(`, `aw`, `a[` and such sequences
 - [ ] Implement `f` and `F`
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] Macros (might be a stretch)
 
-- [ ] divide app.rs into more files to make more modular
+# General checklist
 - [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it)
 
 

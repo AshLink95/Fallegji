@@ -3,6 +3,7 @@ mod auth;       //TODO
 mod messaging;  //TODO
 mod tunneling;  //TODO
 mod logging;    //TODO
+mod vim;
 mod app;
 
 use anyhow::Result;
