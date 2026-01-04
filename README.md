@@ -9,18 +9,21 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 <!-- Connection Types (P2P and group chats) -->
 
 # basic VIM motions checklist:
-- [ ] Numbers
+- [ ] Sequence (Numbers and compounds)
 - [ ] delete and change
 - [ ] Displaying numbers, g, c and d (compounds)
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] Macros (might be a stretch)
 
+- [ ] divide app.rs into more files to make more modular
+- [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it)
+
 
 # Onboarding Menu
 This is a screen users are greated with, which prompts them to choose their name, preferred tunnel ip range among other options like vim motions, colorscheme and layout. Note that these configurable settings are saved in `.config/fallegji`.
 
-Certain configurations can only be set in this config file. Namely, granular colorschemes, custom `.vimrc` scripts, and avatars.
+Certain configurations can only be set in this config file. Namely, granular colorschemes and input height.
 
 # Initial Connection
 When a user decides to be a server, they can choose the number of endpoints allowed and they have their endpoint IP (almost always wifi IP) displayed for clients to enter.

@@ -1,4 +1,4 @@
-// Allow customization for layouts, colorschemes, avatars in config file and allow for vim motions (automatically read .vimrc)
+//TODO: allow customization of border styles, max height, and colors using a toml-style dotfile. Parameters will be set in constants decided by the dotfile.
 use std::io;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -8,9 +8,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Alignment},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, BorderType},
+    text::Line,
     Terminal,
 };
 
@@ -20,7 +21,7 @@ use anyhow::Result;
 enum Vim { Normal, Insert, }
 macro_rules! input_handling {
     ($vim_mode: ident, $input:ident, $cursor_pos:ident) => {
-        //TODO: include a count variable and a g variable for 'ge', a c variable for 'cc' and 'cn-hjkl', same for d
+        //TODO: include a counter variable and a g variable for 'ge', a c variable for 'cc' and 'cn-hjkl', same for d [will be a sequence string that will get parsed using regex]
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
@@ -195,10 +196,24 @@ macro_rules! chat {
             let input_box = Paragraph::new(display_text)
                 .block(
                     Block::default().borders(Borders::ALL)
-                        .title(format!(" {} ({}) ", "Input", mode))
-                        .style(Style::default().fg(Color::White)) // box style
+                        .title(format!(" {} ", "Input")) // dbg: Input will be the User name
+                        .title_bottom(
+                            Line::from(format!(" {} ", mode))
+                                .style(Style::default().fg(match $vim_mode {
+                                    Vim::Normal => Color::Rgb(0,212,255),
+                                    Vim::Insert => Color::Rgb(255,102,204),
+                                }))
+                        )
+                        .title_bottom(
+                            //dbg: replace with actual sequence. pattern match for when there's something
+                            Line::from(format!(" {} ", "1"))
+                                .alignment(Alignment::Right)
+                                .style(Style::default().fg(Color::White))
+                        )
+                        .border_type(BorderType::Rounded)
+                        .style(Style::default().fg(Color::DarkGray)) // box color
                 )
-                .style(Style::default().fg(Color::White)); // text style
+                .style(Style::default().fg(Color::White)); // text color
             
             // Cursor position
             let box_width = chunks[1].width.saturating_sub(2);
