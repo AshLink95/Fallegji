@@ -9,9 +9,10 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 <!-- Connection Types (P2P and group chats) -->
 
 # basic VIM motions checklist:
-- [ ] Sequence (Numbers and compounds)
+- [x] Displaying numbers, g, c and d (compounds)
+- [x] Sequence (Numbers and compounds)
 - [ ] delete and change
-- [ ] Displaying numbers, g, c and d (compounds)
+- [ ] Implement `iw`, `i(` and such sequences
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] Macros (might be a stretch)

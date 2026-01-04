@@ -21,7 +21,7 @@ use ratatui::{
 lazy_static::lazy_static!{static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap();}
 lazy_static::lazy_static!{static ref RE_CHR: Regex = Regex::new(r"[a-zA-Z]").unwrap();}
 
-// Vim motions
+// Vim motions input handling
 #[derive(PartialEq, Eq)]
 enum Vim { Normal, Insert, }
 macro_rules! input_handling {
@@ -144,17 +144,33 @@ macro_rules! input_handling {
                         $seq.clear();
                     },
                     KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
-                        //TODO: add ge treatment
                         if n==0 { n+=1 };
                         while n>0 {
-                            if $cursor_pos < $input.len() { $cursor_pos += 1; }
-                            while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos += 1;
+                            match k {
+                                Some("g") => {
+                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                    while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                        $cursor_pos -= 1;
+                                    }
+                                    while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                        $cursor_pos -= 1;
+                                    }
+                                    while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                        $cursor_pos += 1;
+                                    }
+                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                },
+                                _ => {
+                                    if $cursor_pos < $input.len() { $cursor_pos += 1; }
+                                    while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                        $cursor_pos += 1;
+                                    }
+                                    while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                        $cursor_pos += 1;
+                                    }
+                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                }
                             }
-                            while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos += 1;
-                            }
-                            if $cursor_pos > 0 { $cursor_pos -= 1; }
                             n = n.saturating_sub(1);
                         }
                         $seq.clear();
