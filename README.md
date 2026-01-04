@@ -21,7 +21,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 
 # Onboarding Menu
-This is a screen users are greated with, which prompts them to choose their name, preferred tunnel ip range among other options like vim motions, colorscheme and layout. Note that these configurable settings are saved in `.config/fallegji`.
+This is a screen users are greated with, which prompts them to choose their name, preferred tunnel ip range among other options like vim motions, colorscheme and layout. Note that these configurable settings are saved in `.config/fallegji` or `.fallegji`. yet to decide
 
 Certain configurations can only be set in this config file. Namely, granular colorschemes and input height.
 

@@ -6,4 +6,5 @@ pub struct Message {
     pub sender: User,
     pub contents: String,
     pub created_at: i64
+    //TODO: include chatroom/server name
 }
