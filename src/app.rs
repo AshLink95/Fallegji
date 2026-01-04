@@ -80,6 +80,7 @@ macro_rules! input_handling {
                         $seq.push(n);
                     }
                     KeyCode::Esc if $vim_mode == Vim::Normal => { $seq.clear() },
+                    //TODO: implement delete and change in h and l
                     KeyCode::Char('h') if $vim_mode == Vim::Normal => {
                         if n==0 { n+=1 };
                         while n>0 {
@@ -143,6 +144,7 @@ macro_rules! input_handling {
                         $seq.clear();
                     },
                     KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
+                        //TODO: add ge treatment
                         if n==0 { n+=1 };
                         while n>0 {
                             if $cursor_pos < $input.len() { $cursor_pos += 1; }
@@ -157,7 +159,6 @@ macro_rules! input_handling {
                         }
                         $seq.clear();
                     },
-                    //TODO: ge
                     KeyCode::Char('i') if $vim_mode == Vim::Normal => {
                         $seq.clear();
                         $vim_mode = Vim::Insert;
@@ -181,7 +182,55 @@ macro_rules! input_handling {
                         $vim_mode = Vim::Insert;
                         execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
-                    //TODO next: delete and change
+                    KeyCode::Char('g') if $vim_mode == Vim::Normal => {
+                        match k {
+                            Some("g") => {
+                                $cursor_pos = n.saturating_sub(1);
+                                $seq.clear();
+                            },
+                            Some("d") => { $seq.clear(); },
+                            Some("c") => { $seq.clear(); },
+                            _ => { $seq.push('g'); }
+                        }
+                    },
+                    KeyCode::Char('d') if $vim_mode == Vim::Normal => {
+                        match k {
+                            Some("d") => {
+                                $input.clear();
+                                $seq.clear();
+                                $cursor_pos = 0;
+                            },
+                            Some("g") => { $seq.clear(); },
+                            Some("c") => { $seq.clear(); },
+                            _ => { $seq.push('d'); }
+                        }
+                    },
+                    KeyCode::Char('c') if $vim_mode == Vim::Normal => {
+                        match k {
+                            Some("c") => {
+                                $input.clear();
+                                $seq.clear();
+                                $cursor_pos = 0;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                            },
+                            Some("g") => { $seq.clear(); },
+                            Some("d") => { $seq.clear(); },
+                            _ => { $seq.push('c'); }
+                        }
+                    },
+                    KeyCode::Char('D') if $vim_mode == Vim::Normal => {
+                        while $cursor_pos != $input.len() {
+                            $input.remove($cursor_pos);
+                        }
+                    },
+                    KeyCode::Char('C') if $vim_mode == Vim::Normal => {
+                        while $cursor_pos != $input.len() {
+                            $input.remove($cursor_pos);
+                        }
+                        $vim_mode = Vim::Insert;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                    },
 
                     // INSERT mode handling
                     KeyCode::Backspace if $vim_mode == Vim::Insert => {
@@ -191,7 +240,7 @@ macro_rules! input_handling {
                         }
                     },
                     KeyCode::Esc if $vim_mode == Vim::Insert => {
-                        if $cursor_pos == $input.len() { $cursor_pos = $cursor_pos.saturating_sub(1); };
+                        $cursor_pos = $cursor_pos.saturating_sub(1);
                         $vim_mode = Vim::Normal;
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                     },
