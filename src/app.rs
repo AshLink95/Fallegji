@@ -1,5 +1,5 @@
 //TODO: allow customization of border styles, max height, and colors using a toml-style dotfile. Parameters will be set in constants decided by the dotfile.
-use std::io;
+use std::io::{self, Write};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
@@ -57,10 +57,18 @@ macro_rules! chat {
             let lines: Vec<String> = if $input.is_empty() {
                 vec![String::new()]
             } else {
-                $input.chars()
-                    .collect::<Vec<_>>()
-                    .chunks(box_width as usize)
-                    .map(|chunk| chunk.iter().collect())
+                $input.split('\n')
+                    .flat_map(|line| {
+                        if line.is_empty() {
+                            vec![String::new()]  // Preserve empty lines
+                        } else {
+                            line.chars()
+                                .collect::<Vec<_>>()
+                                .chunks(box_width as usize)
+                                .map(|chunk| chunk.iter().collect())
+                                .collect::<Vec<String>>()
+                        }
+                    })
                     .collect()
             };
             
@@ -85,7 +93,7 @@ macro_rules! chat {
             let input_box = Paragraph::new(display_text)
                 .block(
                     Block::default().borders(Borders::ALL)
-                        .title(format!(" {} ", "Input")) // dbg: Input will be the User name
+                        .title(format!(" {} ", "Input")) // dbg: Input will be the User name (and color-customizable)
                         .title_bottom(
                             Line::from(format!(" {} ", mode))
                                 .style(Style::default().fg(match $vim_mode {
@@ -108,9 +116,15 @@ macro_rules! chat {
                 .style(Style::default().fg(Color::White)); // text color
             
             // Cursor position
-            let box_width = chunks[1].width.saturating_sub(2);
-            let cursor_x = chunks[1].x + 1 + ($cursor_pos as u16 % box_width);
-            let cursor_y = chunks[1].y + 1 + ($cursor_pos as u16 / box_width);
+            let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
+            let newlines_before = chars_before_cursor.iter().filter(|&&c| c == '\n').count();
+            let chars_in_current_line = chars_before_cursor.iter().rev()
+                .take_while(|&&c| c != '\n')
+                .count();
+            
+            let cursor_x = chunks[1].x + 1 + (chars_in_current_line as u16 % box_width);
+            let cursor_y = chunks[1].y + 1 + newlines_before as u16 
+            + (chars_in_current_line as u16 / box_width);
             
             f.render_widget(input_box, chunks[1]);
             f.set_cursor_position((cursor_x, cursor_y));

@@ -17,6 +17,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 # General checklist
 - [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it)
+- [ ] allow `/` commands in-text. Start with the ability to send files
 
 
 # Onboarding Menu

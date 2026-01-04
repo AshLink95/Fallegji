@@ -57,8 +57,15 @@ macro_rules! input_handling {
                         }
                         $seq.clear();
                     },
-                    KeyCode::Enter => {
-                        // dbg: print/send n times (up to 10)
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) && $vim_mode == Vim::Insert => { // NOTE: Specific to this app, allows new lines in messages
+                        $input.insert($cursor_pos, '\n');
+                        $cursor_pos += 1;
+                    },
+                    KeyCode::Enter => { // NOTE: Specific to this app
+                        if n==0 { n = 1 };
+                        for _ in 0..n.min(10) {
+std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_all(format!("{}\n", $input).as_bytes())?; // dbg: print/send n times (up to 10)
+                        }
                         $seq.clear();
                         $input.clear();
                         $cursor_pos = 0;
