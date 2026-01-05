@@ -123,6 +123,7 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                             .map(|pos| pos + 1)
                             .unwrap_or(0);
 
+                        $persis_y = 0;
                         while n>0 && $cursor_pos > line_start {
                             $cursor_pos = $cursor_pos.saturating_sub(1);
                             n = n.saturating_sub(1);
@@ -150,6 +151,7 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                             .map(|pos| $cursor_pos + pos)
                             .unwrap_or($input.len());
 
+                        $persis_y = 0;
                         while n>0 && $cursor_pos < line_end.saturating_sub(1) {
                             if $cursor_pos < $input.len().saturating_sub(1) {
                                 $cursor_pos += 1;
@@ -166,6 +168,93 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                             Some("c") => {
                                 $input.drain(start..$cursor_pos);
                                 $cursor_pos = start;
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
+                    },
+                    KeyCode::Char('j') if $vim_mode == Vim::Normal => {
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
+                        while n>0 {
+                            let lines: Vec<&str> = $input.split('\n').collect();
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                            let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                            
+                            $persis_y = $persis_y.max(current_col);
+                            
+                            if newlines_before < lines.len() - 1 {
+                                let current_line_len = lines[newlines_before].chars().count();
+                                let next_line_len = lines[newlines_before + 1].chars().count();
+                                let target_col = $persis_y.min(next_line_len);
+                                
+                                $cursor_pos += (current_line_len - current_col) + 1 + target_col;
+                            }
+                            n = n.saturating_sub(1);
+                        }
+
+                        if let Some(c) = $input.chars().nth($cursor_pos) {
+                            if c == '\n' {
+                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                            }
+                        }
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                $cursor_pos = start.min($cursor_pos);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                $cursor_pos = start.min($cursor_pos);
+                                $vim_mode = Vim::Insert;
+                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                $seq.clear();
+                            },
+                            _ => { $seq.clear(); }
+                        }
+                    },
+                    KeyCode::Char('k') if $vim_mode == Vim::Normal => {
+                        if n==0 { n=1 };
+                        let start = $cursor_pos;
+                        
+                        while n>0 {
+                            let lines: Vec<&str> = $input.split('\n').collect();
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                            let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                            
+                            $persis_y = $persis_y.max(current_col);
+                            
+                            if newlines_before > 0 {
+                                let prev_line_len = lines[newlines_before - 1].chars().count();
+                                let target_col = $persis_y.min(prev_line_len);
+                                
+                                $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
+                            }
+                            n = n.saturating_sub(1);
+                        }
+
+                        if let Some(c) = $input.chars().nth($cursor_pos) {
+                            if c == '\n' {
+                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                            }
+                        }
+                        
+                        match k {
+                            Some("d") => {
+                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                $cursor_pos = start.min($cursor_pos);
+                                $seq.clear();
+                            },
+                            Some("c") => {
+                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                $cursor_pos = start.min($cursor_pos);
                                 $vim_mode = Vim::Insert;
                                 execute!(io::stdout(), SetCursorStyle::SteadyBar);
                                 $seq.clear();
@@ -483,7 +572,13 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                         }
                     },
                     KeyCode::Esc if $vim_mode == Vim::Insert => {
-                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                        if $cursor_pos > 0 {
+                            if let Some(prev_char) = $input.chars().nth($cursor_pos.saturating_sub(1)) {
+                                if prev_char != '\n' {
+                                    $cursor_pos = $cursor_pos.saturating_sub(1);
+                                }
+                            }
+                        }
                         $vim_mode = Vim::Normal;
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                     },
