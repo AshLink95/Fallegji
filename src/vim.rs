@@ -118,8 +118,12 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     KeyCode::Char('h') if $vim_mode == Vim::Normal => {
                         if n==0 { n=1 };
                         let start = $cursor_pos;
-                        
-                        while n>0 {
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+
+                        while n>0 && $cursor_pos > line_start {
                             $cursor_pos = $cursor_pos.saturating_sub(1);
                             n = n.saturating_sub(1);
                         }
@@ -141,8 +145,12 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     KeyCode::Char('l') if $vim_mode == Vim::Normal => {
                         if n==0 { n=1 };
                         let start = $cursor_pos;
-                        
-                        while n>0 {
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+
+                        while n>0 && $cursor_pos < line_end.saturating_sub(1) {
                             if $cursor_pos < $input.len().saturating_sub(1) {
                                 $cursor_pos += 1;
                             };
