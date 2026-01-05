@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -29,20 +29,41 @@ macro_rules! input_handling {
                     // Universal
                     KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Left => {
-                        if n==0 { n+=1 };
-                        while n>0 {
-                            $cursor_pos = $cursor_pos.saturating_sub(1);
-                            n = n.saturating_sub(1);
-                        }
-                        $seq.clear();
+                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                        $persis_y = 0;
                     },
                     KeyCode::Right => if $cursor_pos < $input.len() {
-                        if n==0 { n+=1 };
-                        while n>0 {
-                            $cursor_pos += 1;
-                            n = n.saturating_sub(1);
+                        $cursor_pos += 1;
+                        $persis_y = 0;
+                    },
+                    KeyCode::Up => {
+                        let lines: Vec<&str> = $input.split('\n').collect();
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                        let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                        
+                        $persis_y = $persis_y.max(current_col);
+                        if newlines_before > 0 {
+                            let prev_line_len = lines[newlines_before - 1].chars().count();
+                            let target_col = $persis_y.min(prev_line_len);
+                            
+                            $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
                         }
-                        $seq.clear();
+                    },
+                    KeyCode::Down => {
+                        let lines: Vec<&str> = $input.split('\n').collect();
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                        let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                        
+                        $persis_y = $persis_y.max(current_col);
+                        if newlines_before < lines.len() - 1 {
+                            let current_line_len = lines[newlines_before].chars().count();
+                            let next_line_len = lines[newlines_before + 1].chars().count();
+                            let target_col = $persis_y.min(next_line_len);
+                            
+                            $cursor_pos += (current_line_len - current_col) + 1 + target_col;
+                        }
                     },
                     KeyCode::Delete => {
                         if n==0 { n+=1 };

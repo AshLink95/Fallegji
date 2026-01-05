@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $curr_screen: ident) => {
+    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -67,8 +67,8 @@ macro_rules! chat {
             
             // Join lines with newlines
             // let display_text = lines.join("\n");
-let visible_lines = &lines[scroll_offset..(scroll_offset + visible_height).min(lines.len())];
-let display_text = visible_lines.join("\n");
+            let visible_lines = &lines[scroll_offset..(scroll_offset + visible_height).min(lines.len())];
+            let display_text = visible_lines.join("\n");
             
             let input_box = Paragraph::new(display_text)
                 .block(
@@ -103,14 +103,13 @@ let display_text = visible_lines.join("\n");
                 .count();
             
             let cursor_x = chunks[1].x + 1 + (chars_in_current_line as u16 % box_width);
-            // let cursor_y = chunks[1].y + 1 + newlines_before as u16 + (chars_in_current_line as u16 / box_width);
-let cursor_y = chunks[1].y + 1 + (cursor_line - scroll_offset) as u16;
+            let cursor_y = chunks[1].y + 1 + (cursor_line - scroll_offset) as u16;
             
             f.render_widget(input_box, chunks[1]);
             f.set_cursor_position((cursor_x, cursor_y));
         })?;
 
         // Handle input keys
-        input_handling!($vim_mode, $seq, $input, $cursor_pos);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y);
     };
 }

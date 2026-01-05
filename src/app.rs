@@ -38,20 +38,21 @@ pub fn app() -> Result<()> {
     let mut vim_mode = Vim::Normal;
     let mut seq = String::new();
     let mut input = String::new();
-    let mut cursor_pos: usize = 0;
+    let mut cursor_pos: usize = 0; // cursor position
+    let mut persis_y: usize = 0;   // peristant y position
 
     let curr_screen = Screen::Chat; //dbg: should be mut and init to Onboarding
 
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Onboarding {
-            onboarding!(terminal, vim_mode, input, cursor_pos, curr_screen);
+            onboarding!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen);
         } else if curr_screen == Screen::InitServer {
-            initServer!(terminal, vim_mode, input, cursor_pos, curr_screen);
+            initServer!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen);
         } else if curr_screen == Screen::InitClient {
-            initClient!(terminal, vim_mode, input, cursor_pos, curr_screen);
+            initClient!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen);
         } else if curr_screen == Screen::Chat {
-            chat!(terminal, vim_mode, seq, input, cursor_pos, curr_screen);
+            chat!(terminal, vim_mode, seq, input, cursor_pos, persis_y, curr_screen);
         }
     }
 
