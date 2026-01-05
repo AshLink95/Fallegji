@@ -10,6 +10,8 @@ pub struct Database {
 }
 
 impl Database {
+    /// Database initialization
+    /// Exceptionally sync, not async
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
 

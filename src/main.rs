@@ -4,6 +4,7 @@ mod messaging;  //TODO
 mod tunneling;  //TODO
 mod logging;    //TODO
 mod vim;
+mod ui_screens;
 mod app;
 
 use anyhow::Result;

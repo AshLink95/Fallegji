@@ -13,6 +13,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Implement `f` and `F`
 - [ ] replace and replace mode
 - [ ] Visual mode
+- [ ] undo/redo
 - [ ] Macros (might be a stretch)
 
 # General checklist
