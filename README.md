@@ -10,7 +10,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 # advanced VIM motions checklist:
 - [ ] Implement `iw`, `i(`, `aw`, `a[` and such sequences
-- [ ] Implement `f` and `F`
+- [ ] Implement `f`, `F`, `t` and `T`
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] undo/redo
