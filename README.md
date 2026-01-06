@@ -14,6 +14,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] undo/redo
+- [ ] scrolling (requires flexible scrolling in `chat!`)
 - [ ] Macros (might be a stretch)
 
 # General checklist
