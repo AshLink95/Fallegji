@@ -316,19 +316,27 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     },
                     KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='^' || s=='_') => {
                         let start = $cursor_pos;
-                        
-                        match $input.chars().nth(0) {
-                            Some(' ') => {
-                                $cursor_pos = 0;
-                                while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                    $cursor_pos += 1;
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+
+                        $cursor_pos = line_start;
+                        $persis_y = 0;
+                        while $cursor_pos < line_end {
+                            if let Some(c) = $input.chars().nth($cursor_pos) {
+                                if !c.is_whitespace() || c == '\n' {
+                                    break;
                                 }
-                                while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                    $cursor_pos += 1;
-                                }
-                                $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
-                            },
-                            _ => { $cursor_pos = 0; }
+                            }
+                            $cursor_pos += 1;
+                        }
+                        if $cursor_pos >= line_end {
+                            $cursor_pos = line_start;
                         }
                         
                         match k {
@@ -480,32 +488,45 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     },
                     KeyCode::Char('I') if $vim_mode == Vim::Normal => {
                         $seq.clear();
-                        match $input.chars().nth(0) {
-                            Some(' ') => {
-                                $seq.clear();
-                                $cursor_pos = 0;
-                                while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                    $cursor_pos += 1;
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+
+                        $cursor_pos = line_start;
+                        $persis_y = 0;
+                        while $cursor_pos < line_end {
+                            if let Some(c) = $input.chars().nth($cursor_pos) {
+                                if !c.is_whitespace() || c == '\n' {
+                                    break;
                                 }
-                                while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                    $cursor_pos += 1;
-                                }
-                                $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
-                            },
-                            _ => { $cursor_pos = 0; }
+                            }
+                            $cursor_pos += 1;
+                        }
+                        if $cursor_pos >= line_end {
+                            $cursor_pos = line_start;
                         }
                         $vim_mode = Vim::Insert;
                         execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
                     KeyCode::Char('a') if $vim_mode == Vim::Normal => {
                         $seq.clear();
-                        if $cursor_pos < $input.len() { $cursor_pos += 1; };
+                        if $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') { $cursor_pos += 1; };
                         $vim_mode = Vim::Insert;
                         execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
                     KeyCode::Char('A') if $vim_mode == Vim::Normal => {
                         $seq.clear();
-                        $cursor_pos = $input.len();
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+
+                        $cursor_pos = line_end;
                         $vim_mode = Vim::Insert;
                         execute!(io::stdout(), SetCursorStyle::SteadyBar);
                     },
