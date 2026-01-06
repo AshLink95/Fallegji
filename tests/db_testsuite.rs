@@ -1,8 +1,7 @@
 // prompt engineered
 use fallegji::db::Database;
-use fallegji::auth::{User, Role, Authentication};
+use fallegji::auth::{User, Authentication};
 use fallegji::messaging::Message;
-use std::net::{SocketAddr, Ipv4Addr};
 use tokio::fs;
 use anyhow::Result;
 
@@ -40,10 +39,10 @@ async fn test_create_read_message() -> Result<()> {
     let user = db.create_user("abc".to_string(), "bob".to_string()).await?;
     
     // Create message
-    let msg: Message = db.create_message(user, "Hello world!".to_string()).await?;
-    assert_eq!(msg.contents, "Hello world!");
-    assert!(msg.id > 0);
-    assert!(msg.created_at > 0);
+    let msg: Message = db.create_message(user.get_id(), "Hello world!".to_string()).await?;
+    assert_eq!(msg.get_contents(), "Hello world!");
+    assert!(msg.get_id() > 0);
+    assert!(msg.get_created_at() > 0);
     
     // // Read message
     // let read_msg = db.read_message(msg.id).await?;

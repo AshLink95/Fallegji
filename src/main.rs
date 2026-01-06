@@ -1,11 +1,12 @@
-mod db;         //TODO
-mod auth;       //TODO
-mod messaging;  //TODO
+mod db;         //TODO: (will change again to add tunneling)
 mod tunneling;  //TODO
-mod logging;    //TODO
+mod messaging;  //TODO: dependant on tunneling
+mod ui_screens; //TODO: dependant on messaging
+mod app;        //TODO: dependant on everything (might build a manager)
+mod logging;    //TODO: last
+
+mod auth;
 mod vim;
-mod ui_screens;
-mod app;
 
 use anyhow::Result;
 

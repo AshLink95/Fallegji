@@ -3,7 +3,7 @@ use tokio::task;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-use crate::{auth::User, messaging::Message};
+use crate::{auth::User, messaging::Message}; //TODO: will include tunneling also
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -54,19 +54,19 @@ impl Database {
         }).await?
     }
     /// Message creation
-    pub async fn create_message(&self, sender: User, contents: String) -> Result<Message> {
+    pub async fn create_message(&self, sender_id: u64, contents: String) -> Result<Message> {
         let conn = Arc::clone(&self.conn);
-        let sender_id_str = sender.get_id().to_string();
+        let sender_id_str = sender_id.to_string();
         let contents_clone = contents.clone();
         
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            
+
             conn.execute(
                 "INSERT INTO messages (sender_id, contents) VALUES (?1, ?2)",
                 params![sender_id_str, contents_clone],
             )?;
-            
+
             let message_id = conn.last_insert_rowid() as i32;
             let mut stmt = conn.prepare(
                 "SELECT m.created_at, u.id, u.name, u.role, u.addr 
@@ -74,14 +74,9 @@ impl Database {
                  JOIN users u ON m.sender_id = u.id 
                  WHERE m.id = ?1"
             )?;
-            
+
             let message = stmt.query_row(params![message_id], |row| {
-                Ok(Message {
-                    id: message_id,
-                    sender,
-                    contents,
-                    created_at: row.get(0)?,
-                })
+                Ok(Message::new(message_id, sender_id, contents))
             })?;
             
             Ok(message)

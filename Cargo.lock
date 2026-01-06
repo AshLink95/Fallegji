@@ -508,6 +508,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "sha2",
+ "time",
  "tokio",
  "tokio-test",
  "zeromq",

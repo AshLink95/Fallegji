@@ -1,3 +1,5 @@
+<!-- TODO: add shields upon public release -->
+
 <div align="center"> <h1>Fallegji</h1> </div> <!-- Might replace with a logo -->
 
 Fallegji is a terminal-based chat app written in Rust. It's inspired by the Fallega of north Africa who were responsible for the armed resistance against colonialism and operated in total secrecy.
@@ -18,7 +20,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Macros (might be a stretch)
 
 # General checklist
-- [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it)
+- [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it). This file is necessary and gets automatically generated as it also contains the wireguard/boringTUN public keys per chat
 - [ ] allow `/` commands in-text. Start with the ability to send files
 
 
