@@ -95,7 +95,12 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     // NORMAL mode handling
                     KeyCode::Char('0') if n==0 && $vim_mode == Vim::Normal => {
                         let start = $cursor_pos;
-                        $cursor_pos = 0;
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+
+                        $cursor_pos = line_start;
                         
                         match k {
                             Some("d") => {
@@ -199,7 +204,14 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
 
                         if let Some(c) = $input.chars().nth($cursor_pos) {
                             if c == '\n' {
-                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                    .map(|pos| pos + 1)
+                                    .unwrap_or(0);
+                                
+                                if $cursor_pos > line_start {
+                                    $cursor_pos = $cursor_pos.saturating_sub(1);
+                                }
                             }
                         }
                         
@@ -242,7 +254,14 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
 
                         if let Some(c) = $input.chars().nth($cursor_pos) {
                             if c == '\n' {
-                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                    .map(|pos| pos + 1)
+                                    .unwrap_or(0);
+                                
+                                if $cursor_pos > line_start {
+                                    $cursor_pos = $cursor_pos.saturating_sub(1);
+                                }
                             }
                         }
                         
@@ -264,7 +283,20 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     },
                     KeyCode::Char('$') if $vim_mode == Vim::Normal => {
                         let start = $cursor_pos;
-                        $cursor_pos = $input.len().saturating_sub(1);
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+
+                        if line_end > line_start {
+                            $cursor_pos = line_end.saturating_sub(1);
+                        } else {
+                            $cursor_pos = line_start;
+                        }
                         
                         match k {
                             Some("d") => {
