@@ -8,3 +8,5 @@ pub struct Message {
     pub created_at: i64
     //TODO: include chatroom/server name
 }
+
+//TODO: make the message fields private and write accessor and mutator methods

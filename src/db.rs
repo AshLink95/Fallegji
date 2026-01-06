@@ -19,7 +19,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                role TEXT CHECK(role IN ('Server', 'Client')),
+                role TEXT CHECK(role IN ('server', 'client')),
                 addr TEXT
             )",
             [],
@@ -39,28 +39,57 @@ impl Database {
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
+    // Creation
+    /// User creation
+    pub async fn create_user(&self, name: String) -> Result<User> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let user = User::new(name.clone());
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, name, role, addr) VALUES (?1, ?2, ?3, ?4)",
+                params![ user.get_id().to_string(), name, None::<&str>, None::<&str> ],
+            )?;
+            Ok( user )
+        }).await?
+    }
+    /// Message creation
+    pub async fn create_message(&self, sender: User, contents: String) -> Result<Message> {
+        let conn = Arc::clone(&self.conn);
+        let sender_id_str = sender.get_id().to_string();
+        let contents_clone = contents.clone();
+        
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            
+            conn.execute(
+                "INSERT INTO messages (sender_id, contents) VALUES (?1, ?2)",
+                params![sender_id_str, contents_clone],
+            )?;
+            
+            let message_id = conn.last_insert_rowid() as i32;
+            let mut stmt = conn.prepare(
+                "SELECT m.created_at, u.id, u.name, u.role, u.addr 
+                 FROM messages m 
+                 JOIN users u ON m.sender_id = u.id 
+                 WHERE m.id = ?1"
+            )?;
+            
+            let message = stmt.query_row(params![message_id], |row| {
+                Ok(Message {
+                    id: message_id,
+                    sender,
+                    contents,
+                    created_at: row.get(0)?,
+                })
+            })?;
+            
+            Ok(message)
+        }).await?
+    }
+
     //TODO: CRUD for both users and messages
     
-    // // CREATE template
-    // pub fn create_user( &self, id:i64) -> Result<i64> {
-    //     let notif_times_json = serde_json::to_string(&notif_times)?;
-    //     let created_at = time::OffsetDateTime::now_utc().unix_timestamp();
-    //
-    //     self.conn.execute(
-    //         "INSERT INTO notifs (title, detail, deadline, notif_times, created_at) 
-    //          VALUES (?1, ?2, ?3, ?4, ?5)",
-    //         params![
-    //             title,
-    //             detail,
-    //             deadline,
-    //             notif_times_json,
-    //             created_at
-    //         ]
-    //     )?;
-    //
-    //     Ok(self.conn.last_insert_rowid())
-    // }
-    //
     // // READ template
     // pub fn read(&self, id: i64) -> Result<Notif> {
     //     let mut stmt = self.conn.prepare(
