@@ -9,6 +9,17 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
+pub trait ServerDB { //TODO: requires messaging and tunneling
+    fn sync_clients(&self) -> Result<()>;
+    fn listen_to_clients(&self) -> Result<()>;
+}
+
+pub trait ClientDB { //TODO: requires messaging and tunneling
+    fn sync_with_server(&self) -> Result<()>;
+    /// Method invoked after closing chat room to keep clients from manipulating it
+    fn lock_client_copy(&self) -> Result<()>;
+}
+
 impl Database {
     /// Database initialization
     /// Exceptionally sync, not async
@@ -83,66 +94,34 @@ impl Database {
         }).await?
     }
 
-    //TODO: CRUD for both users and messages
-    
-    // // READ template
-    // pub fn read(&self, id: i64) -> Result<Notif> {
-    //     let mut stmt = self.conn.prepare(
-    //         "SELECT title, detail, deadline, notif_times, created_at 
-    //          FROM notifs 
-    //          WHERE id = ?1"
-    //     )?;
-    //
-    //     let notif = stmt.query_row([id], |row| {
-    //         let notif_times_str: String = row.get(3)?;
-    //         let notif_times = serde_json::from_str(&notif_times_str)
-    //             .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-    //                 3,
-    //                 rusqlite::types::Type::Text,
-    //                 Box::new(e),
-    //             ))?;
-    //
-    //         Ok(Notif {
-    //             id,
-    //             title: row.get(0)?,
-    //             detail: row.get(1)?,
-    //             deadline: row.get(2)?,
-    //             notif_times,
-    //             created_at: row.get(4)?,
-    //         })
-    //     })?;
-    //
-    //     Ok(notif)
-    // }
-    //
-    // // LIST ALL template
-    // pub fn list_all(&self) -> Result<Vec<Notif>> {
-    //     let mut stmt = self.conn.prepare(
-    //         "SELECT id, title, detail, deadline, notif_times, created_at FROM notifs"
-    //     )?;
-    //
-    //     let notifs = stmt.query_map([], |row| {
-    //         let notif_times_str: String = row.get(4)?;
-    //         let notif_times = serde_json::from_str(&notif_times_str)
-    //             .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-    //                 4,
-    //                 rusqlite::types::Type::Text,
-    //                 Box::new(e),
-    //             ))?;
-    //
-    //         Ok(Notif {
-    //             id: row.get(0)?,
-    //             title: row.get(1)?,
-    //             detail: row.get(2)?,
-    //             deadline: row.get(3)?,
-    //             notif_times,
-    //             created_at: row.get(5)?,
-    //         })
-    //     })?
-    //     .collect::<Result<Vec<_>, _>>()?;
-    //
-    //     Ok(notifs)
-    // }
-
-    //TODO: update and delete
+    //TODO: CRUD & listAll for both users and messages
 }
+
+// impl ServerDB for Database {
+//     fn sync_clients(&self) -> Result<()> {
+//         Ok(())
+//     }
+//     fn listen_to_clients(&self) -> Result<()> {
+//         Ok(())
+//     }
+// }
+
+// impl ClientDB for Database {
+//     fn sync_with_server(&self) -> Result<()> {
+//         Ok(())
+//     }
+//
+//     fn lock_client_copy(&self) -> Result<()> {
+//         match self.conn.lock() {
+//             Ok(guard) => {
+//                 guard.execute_batch("PRAGMA query_only = 1")?;
+//                 Ok(())
+//             },
+//             Err(poisoned) => {
+//                 let conn = poisoned.into_inner();
+//                 conn.execute_batch("PRAGMA query_only = 1")?;
+//                 Ok(())
+//             }
+//         }
+//     }
+// }
