@@ -240,7 +240,6 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                             let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
                             let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
                             let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                            
                             $persis_y = $persis_y.max(current_col);
                             
                             if newlines_before > 0 {
@@ -532,17 +531,40 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     },
                     KeyCode::Char('g') if $vim_mode == Vim::Normal => {
                         match k {
-                            Some("g") => {
-                                $cursor_pos = n.saturating_sub(1);
+                            Some(s) if s.contains('g') => {
+                                let target_line = if n == 0 { 0 } else { n.saturating_sub(1) };
+                                let lines: Vec<&str> = $input.split('\n').collect();
+                                let target_line = target_line.min(lines.len().saturating_sub(1));
+
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                                $persis_y = $persis_y.max(current_col);
+                                $cursor_pos = lines.iter()
+                                    .take(target_line)
+                                    .map(|line| line.chars().count() + 1)
+                                    .sum::<usize>();
+
+                                let target_line_len = lines[target_line].chars().count();
+                                let target_col = $persis_y.min(target_line_len);
+                                $cursor_pos += target_col;
                                 $seq.clear();
                             },
                             _ => { $seq.push('g'); }
                         }
                     },
                     KeyCode::Char('S') if $vim_mode == Vim::Normal => {
-                        $input.clear();
+                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                            .map(|pos| pos + 1)
+                            .unwrap_or(0);
+                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                        let line_end = chars_after.iter().position(|&c| c == '\n')
+                            .map(|pos| $cursor_pos + pos)
+                            .unwrap_or($input.len());
+
+                        $input.drain(line_start..line_end);
+                        $cursor_pos = line_start;
                         $seq.clear();
-                        $cursor_pos = 0;
                     },
                     KeyCode::Char('s') if $vim_mode == Vim::Normal => {
                         if n==0 { n+=1 };
@@ -581,9 +603,37 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     KeyCode::Char('d') if $vim_mode == Vim::Normal => {
                         match k {
                             Some("d") => {
-                                $input.clear();
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                    .map(|pos| pos + 1)
+                                    .unwrap_or(0);
+                                let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                                let line_end = chars_after.iter().position(|&c| c == '\n')
+                                    .map(|pos| $cursor_pos + pos)
+                                    .unwrap_or($input.len());
+                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                                let (delete_start, delete_end) = if line_start > 0 {
+                                    (line_start - 1, line_end)
+                                } else if line_end < $input.len() {
+                                    (line_start, line_end + 1)
+                                } else {
+                                    (line_start, line_end)
+                                };
+                                $input.drain(delete_start..delete_end);
+
+                                let chars_before_new: Vec<char> = $input.chars().take(delete_start).collect();
+                                let prev_line_start = chars_before_new.iter().rposition(|&c| c == '\n')
+                                    .map(|pos| pos + 1)
+                                    .unwrap_or(0);
+                                let prev_line_len = delete_start.saturating_sub(prev_line_start);
+                                $cursor_pos = prev_line_start + current_col.min(prev_line_len);
+                                if let Some(c) = $input.chars().nth($cursor_pos) {
+                                    if c == '\n' && $cursor_pos > prev_line_start {
+                                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                                    }
+                                }
+
                                 $seq.clear();
-                                $cursor_pos = 0;
                             },
                             Some("g") => { $seq.clear(); },
                             Some("c") => { $seq.clear(); },
@@ -593,9 +643,18 @@ std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_al
                     KeyCode::Char('c') if $vim_mode == Vim::Normal => {
                         match k {
                             Some("c") => {
-                                $input.clear();
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                    .map(|pos| pos + 1)
+                                    .unwrap_or(0);
+                                let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                                let line_end = chars_after.iter().position(|&c| c == '\n')
+                                    .map(|pos| $cursor_pos + pos)
+                                    .unwrap_or($input.len());
+
+                                $input.drain(line_start..line_end);
+                                $cursor_pos = line_start;
                                 $seq.clear();
-                                $cursor_pos = 0;
                                 $vim_mode = Vim::Insert;
                                 execute!(io::stdout(), SetCursorStyle::SteadyBar);
                             },
