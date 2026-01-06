@@ -41,10 +41,10 @@ impl Database {
 
     // Creation
     /// User creation
-    pub async fn create_user(&self, name: String) -> Result<User> {
+    pub async fn create_user(&self, key: String, name: String) -> Result<User> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
-            let user = User::new(name.clone());
+            let user = User::new(key, name.clone());
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO users (id, name, role, addr) VALUES (?1, ?2, ?3, ?4)",

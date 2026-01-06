@@ -4,7 +4,7 @@ use nix::unistd::getuid;
 use sha2::{Digest, Sha256};
 use anyhow::Result;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role { Server, Client }
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,24 +32,29 @@ pub struct User {
     addr: Option<SocketAddr>
 }
 
+/// Authentication Trait, contains `gen_id` and `ver_id`
 pub trait Authentication { // currently only works on linux
-    fn gen_id(name: String) -> u64;
-    fn ver_id(&self, name: String) -> bool;
+    /// method to generate id
+    /// The key argument needs to be the tunnel (wireguard/boringTUN) public key
+    fn gen_id(key: String, name: &str) -> u64;
+    /// method to verify id
+    /// The key argument needs to be the tunnel (wireguard/boringTUN) public key
+    fn ver_id(&self, key: String, name: &str) -> bool;
 }
 
-// requires tunneling
+/// Contains server user-sepcific methods
 pub trait Server {
-    fn init_server(&mut self);
+    fn init_server(&mut self); //updates addr
 }
 
-// requires tunneling
+/// Contains client user-sepcific methods
 pub trait Client {
     fn connect_client(&mut self); //updates addr
 }
 
 impl User {
-    pub fn new(name: String) -> Self {
-        let id = Self::gen_id(name.clone());
+    pub fn new(key: String, name: String) -> Self {
+        let id = Self::gen_id(key, &name);
         Self { id, name, role: None, addr: None }
     }
 
@@ -64,9 +69,9 @@ impl User {
 }
 
 impl Authentication for User {
-    fn gen_id(name: String) -> u64 {
+    fn gen_id(key: String, name: &str) -> u64 {
         let uid = getuid().as_raw();
-        let to_hash = name + &uid.to_string();
+        let to_hash = key + name + &uid.to_string();
         let mut hasher = Sha256::new();
         hasher.update(to_hash.as_bytes());
         let res = hasher.finalize();
@@ -80,9 +85,9 @@ impl Authentication for User {
         id
     }
 
-    fn ver_id(&self, name: String) -> bool {
+    fn ver_id(&self, key: String, name: &str) -> bool {
         let uid = getuid().as_raw();
-        let to_hash = name.clone() + &uid.to_string();
+        let to_hash = key + name + &uid.to_string();
         let mut hasher = Sha256::new();
         hasher.update(to_hash.as_bytes());
         let res = hasher.finalize();
