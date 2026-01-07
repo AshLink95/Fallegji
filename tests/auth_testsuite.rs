@@ -88,12 +88,10 @@ fn test_user_setters() {
     
     // Test setters work
     let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
-    user.set_name("alice".to_string());
     user.set_role(Role::Client);
     user.set_addr(addr);
     
     // Verify getters
-    assert_eq!(user.get_name(), "alice");
     assert_eq!(user.get_role(), Some(Role::Client));
     assert_eq!(user.get_addr(), Some(addr));
 }
@@ -103,7 +101,6 @@ fn test_user_setters_dont_change_id() {
     let mut user = User::new("key".to_string(), "initial".to_string());
     let original_id = user.get_id();
     
-    user.set_name("new_name".to_string());
     user.set_role(Role::Server);
     
     // ID remains stable (computed at creation from key+name)

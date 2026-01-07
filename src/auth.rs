@@ -63,7 +63,6 @@ impl User {
     pub fn get_role(&self) -> Option<Role> { self.role.clone() }
     pub fn get_addr(&self) -> Option<SocketAddr> { self.addr }
 
-    pub fn set_name(&mut self, name: String) { self.name = name; }
     pub fn set_role(&mut self, role: Role) { self.role = Some(role); }
     pub fn set_addr(&mut self, addr: SocketAddr) { self.addr = Some(addr) }
 }

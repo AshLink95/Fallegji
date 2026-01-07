@@ -24,5 +24,5 @@ impl Message {
     pub fn get_created_at(&self) -> i64 { self.created_at }
 
     pub fn set_contents(&mut self, contents: String) { self.contents = contents; }
-    pub fn contents_display(&self) -> String { self.contents.clone() }
+    pub fn set_date(&mut self, date: i64) { self.created_at = date; }
 }

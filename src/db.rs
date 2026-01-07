@@ -94,7 +94,57 @@ impl Database {
         }).await?
     }
 
-    //TODO: CRUD & listAll for both users and messages
+    // Read instance from id
+    /// User instance reader from id
+    pub async fn read_user(&self, id: u64) -> Result<User> {
+        let conn = Arc::clone(&self.conn);
+        let id_str = id.to_string();
+        
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id, name, role, addr FROM users WHERE id = ?1"
+            )?;
+
+            let key = String::from("rand"); //dbg: key will be fetched from tunnels, using corresponding user id
+            
+            let user = stmt.query_row(params![id_str], |row| {
+                let name: String = row.get(1)?;
+                let mut user = User::new(key, name);
+                if let Some(r) = row.get::<_, Option<String>>(2)?.map(|s| s.parse().unwrap()) { user.set_role(r); }
+                if let Some(a) = row.get::<_, Option<String>>(3)?.and_then(|s| s.parse().ok()) { user.set_addr(a); }
+                Ok(user)
+            })?;
+            
+            Ok(user)
+        }).await?
+    }
+
+    /// Message instance reader from id
+    pub async fn read_message(&self, id: i32) -> Result<Message> {
+        let conn = Arc::clone(&self.conn);
+        
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id, sender_id, contents, created_at FROM messages WHERE id = ?1"
+            )?;
+            
+            let message = stmt.query_row(params![id], |row| {
+                let id = row.get(0)?;
+                let sender_id = row.get::<_, String>(1)?.parse().unwrap();
+                let contents = row.get(2)?;
+                let created_at = row.get(3)?;
+                let mut message = Message::new(id, sender_id, contents);
+                message.set_date(created_at);
+                Ok(message)
+            })?;
+            
+            Ok(message)
+        }).await?
+    }
+
+    //TODO: (CR)UD & list_all/load_all for both users and messages
 }
 
 // impl ServerDB for Database {
