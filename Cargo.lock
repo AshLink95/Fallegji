@@ -414,7 +414,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
- "getrandom",
+ "hex",
  "lazy_static",
  "nix 0.30.1",
  "ratatui",

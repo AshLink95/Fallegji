@@ -2,6 +2,7 @@
 use fallegji::db::Database;
 use fallegji::auth::{User, Authentication};
 use fallegji::messaging::Message;
+use nix::unistd::getuid;
 use tokio::fs;
 use anyhow::Result;
 
@@ -13,7 +14,7 @@ async fn test_create_read_user() -> Result<()> {
     let db: Database = Database::new(db_path)?;
     
     // Create
-    let created: User = db.create_user("a1*".to_string(), "alice".to_string()).await?;
+    let created: User = db.create_user("a1*".to_string(), "alice".to_string(), getuid()).await?;
     assert!(created.ver_id("a1*".to_string(), "alice"));
     assert_eq!(created.get_name(), "alice");
     
@@ -36,7 +37,7 @@ async fn test_create_read_message() -> Result<()> {
     let db: Database = Database::new(db_path)?;
     
     // Setup user first
-    let user = db.create_user("abc".to_string(), "bob".to_string()).await?;
+    let user = db.create_user("abc".to_string(), "bob".to_string(), getuid()).await?;
     
     // Create message
     let msg: Message = db.create_message(user.get_id(), "Hello world!".to_string()).await?;

@@ -1,9 +1,10 @@
+use nix::unistd::Uid;
 use rusqlite::{Connection, params};
 use tokio::task;
-use anyhow::Result;
+use anyhow::{Result, Error, bail};
 use std::sync::{Arc, Mutex};
 
-use crate::{auth::User, messaging::Message}; //TODO: will include connection also
+use crate::{auth::{Authentication, User}, messaging::Message}; //TODO: will include connection also
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -30,7 +31,8 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                role TEXT CHECK(role IN ('admin', 'member'))
+                role TEXT CHECK(role IN ('admin', 'member')),
+                uid INTEGER NOT NULL
             )",
             [],
         )?;
@@ -51,14 +53,14 @@ impl Database {
 
     // Creation
     /// User creation
-    pub async fn create_user(&self, key: String, name: String) -> Result<User> {
+    pub async fn create_user(&self, key: String, name: String, uid: Uid) -> Result<User> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
-            let user = User::new(key, name.clone());
+            let user = User::new(key, name.clone(), uid);
             let conn = conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO users (id, name, role) VALUES (?1, ?2, ?3)",
-                params![ user.get_id().to_string(), name, None::<&str> ],
+                "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
+                params![ user.get_id().to_string(), name, None::<&str>, uid.as_raw() ],
             )?;
             Ok( user )
         }).await?
@@ -85,7 +87,7 @@ impl Database {
                  WHERE m.id = ?1"
             )?;
 
-            let message = stmt.query_row(params![message_id], |row| {
+            let message = stmt.query_row(params![message_id], |_| {
                 Ok(Message::new(message_id, sender_id, contents))
             })?;
             
@@ -102,17 +104,27 @@ impl Database {
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare(
-                "SELECT id, name, role FROM users WHERE id = ?1"
+                "SELECT id, name, role, uid FROM users WHERE id = ?1"
             )?;
 
-            let key = String::from("rand"); //dbg: key will be fetched from tunnels, using corresponding user id
+            let key = String::from("rand"); //dbg: key will be fetched from peers, using corresponding user id
             
-            let user = stmt.query_row(params![id_str], |row| {
+            let (user, user_id) = stmt.query_row(params![id_str], |row| {
                 let name: String = row.get(1)?;
-                let mut user = User::new(key, name);
+                let uid: Uid = row.get::<_, Option<u32>>(3)?.map(Uid::from).unwrap();
+                let mut user = User::new(
+                    key.clone(),
+                    name,
+                    uid
+                );
                 if let Some(r) = row.get::<_, Option<String>>(2)?.map(|s| s.parse().unwrap()) { user.set_role(r); }
-                Ok(user)
+                let user_id: u64 = row.get::<_, Option<String>>(0)?.map(|s| s.parse::<u64>().unwrap()).unwrap();
+                Ok((user, user_id))
             })?;
+
+            if !user.ver_id(key, &user.get_name()) || user.get_id() != user_id {
+                bail!("Invalid key or user");
+            }
             
             Ok(user)
         }).await?

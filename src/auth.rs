@@ -1,5 +1,5 @@
 use std::{fmt, str};
-use nix::unistd::getuid;
+use nix::unistd::{getuid, Uid};
 use sha2::{Digest, Sha256};
 use anyhow::Result;
 
@@ -27,35 +27,36 @@ impl str::FromStr for Role {
 pub struct User {
     id: u64,
     name: String,
-    role: Option<Role>
+    role: Option<Role>,
+    uid: Uid
 }
 
 /// Authentication Trait, contains `gen_id` and `ver_id`
 pub trait Authentication { // currently only works on linux
     /// method to generate id
     /// The key argument needs to be the tunnel (wireguard/boringTUN) public key
-    fn gen_id(key: String, name: &str) -> u64;
+    fn gen_id(key: String, name: &str, uid: Uid) -> u64;
     /// method to verify id
     /// The key argument needs to be the tunnel (wireguard/boringTUN) public key
     fn ver_id(&self, key: String, name: &str) -> bool;
 }
 
 impl User {
-    pub fn new(key: String, name: String) -> Self {
-        let id = Self::gen_id(key, &name);
-        Self { id, name, role: None, }
+    pub fn new(key: String, name: String, uid: Uid) -> Self {
+        let id = Self::gen_id(key, &name, uid);
+        Self { id, name, role: None, uid }
     }
 
     pub fn get_id(&self) -> u64 { self.id }
     pub fn get_name(&self) -> String { self.name.clone() }
     pub fn get_role(&self) -> Option<Role> { self.role.clone() }
+    pub fn get_uid(&self) -> Uid { self.uid }
 
     pub fn set_role(&mut self, role: Role) { self.role = Some(role); }
 }
 
 impl Authentication for User {
-    fn gen_id(key: String, name: &str) -> u64 {
-        let uid = getuid().as_raw();
+    fn gen_id(key: String, name: &str, uid: Uid) -> u64 {
         let to_hash = key + name + &uid.to_string();
         let mut hasher = Sha256::new();
         hasher.update(to_hash.as_bytes());
@@ -71,7 +72,7 @@ impl Authentication for User {
     }
 
     fn ver_id(&self, key: String, name: &str) -> bool {
-        let uid = getuid().as_raw();
+        let uid = self.uid;
         let to_hash = key + name + &uid.to_string();
         let mut hasher = Sha256::new();
         hasher.update(to_hash.as_bytes());
