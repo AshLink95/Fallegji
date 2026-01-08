@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use zmq;
 use tokio::task;
 use time::OffsetDateTime;
-use crate::{auth::User, db::Database};
+use crate::{auth::User, connection::Peer, db::Database};
 
 pub struct Message {
     id: i32,
@@ -12,7 +13,8 @@ pub struct Message {
 
 pub struct Chat {
     message_history: Vec<Message>,
-    //peers or tunnel endpoints (map sender id to sender name, wait for connection.rs)
+    members: HashMap<u64, User>, // user_id -> User
+    peers: HashMap<u64, Peer>, // user_id -> Peer
     current_user: User,
     db: Database
 }

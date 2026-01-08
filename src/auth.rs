@@ -1,16 +1,15 @@
 use std::{fmt, str};
-use std::net::SocketAddr;
 use nix::unistd::getuid;
 use sha2::{Digest, Sha256};
 use anyhow::Result;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Role { Server, Client }
+pub enum Role { Admin, Member }
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Role::Server => write!(f, "server"),
-            Role::Client => write!(f, "client"),
+            Role::Admin => write!(f, "admin"),
+            Role::Member => write!(f, "member"),
         }
     }
 }
@@ -18,8 +17,8 @@ impl str::FromStr for Role {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
-            "server" => Ok(Role::Server),
-            "client" => Ok(Role::Client),
+            "admin" => Ok(Role::Admin),
+            "member" => Ok(Role::Member),
             _ => anyhow::bail!("Invalid role: {}", s),
         }
     }
@@ -28,8 +27,7 @@ impl str::FromStr for Role {
 pub struct User {
     id: u64,
     name: String,
-    role: Option<Role>,
-    addr: Option<SocketAddr>
+    role: Option<Role>
 }
 
 /// Authentication Trait, contains `gen_id` and `ver_id`
@@ -42,29 +40,17 @@ pub trait Authentication { // currently only works on linux
     fn ver_id(&self, key: String, name: &str) -> bool;
 }
 
-/// Contains server user-sepcific methods
-pub trait Server { //TODO: requires connection
-    fn init_server(&mut self); // creates a new user (has key) with an addr
-}
-
-/// Contains client user-sepcific methods
-pub trait Client { //TODO: requires connection
-    fn connect_client(&mut self); // creates a new user (has key) with an addr
-}
-
 impl User {
     pub fn new(key: String, name: String) -> Self {
         let id = Self::gen_id(key, &name);
-        Self { id, name, role: None, addr: None }
+        Self { id, name, role: None, }
     }
 
     pub fn get_id(&self) -> u64 { self.id }
     pub fn get_name(&self) -> String { self.name.clone() }
     pub fn get_role(&self) -> Option<Role> { self.role.clone() }
-    pub fn get_addr(&self) -> Option<SocketAddr> { self.addr }
 
     pub fn set_role(&mut self, role: Role) { self.role = Some(role); }
-    pub fn set_addr(&mut self, addr: SocketAddr) { self.addr = Some(addr) }
 }
 
 impl Authentication for User {

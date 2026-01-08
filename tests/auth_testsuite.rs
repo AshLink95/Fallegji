@@ -5,22 +5,22 @@ use std::net::{SocketAddr, Ipv4Addr};
 
 #[test]
 fn test_role_display() {
-    assert_eq!("server".to_string(), format!("{}", Role::Server));
-    assert_eq!("client".to_string(), format!("{}", Role::Client));
+    assert_eq!("admin".to_string(), format!("{}", Role::Admin));
+    assert_eq!("member".to_string(), format!("{}", Role::Member));
 }
 
 #[test]
 fn test_role_fromstr_valid() -> Result<()> {
-    assert_eq!("server".parse::<Role>()?, Role::Server);
-    assert_eq!("SERVER".parse::<Role>()?, Role::Server);
-    assert_eq!("client".parse::<Role>()?, Role::Client);
-    assert_eq!("CLIENT".parse::<Role>()?, Role::Client);
+    assert_eq!("admin".parse::<Role>()?, Role::Admin);
+    assert_eq!("ADMIN".parse::<Role>()?, Role::Admin);
+    assert_eq!("member".parse::<Role>()?, Role::Member);
+    assert_eq!("MEMBER".parse::<Role>()?, Role::Member);
     Ok(())
 }
 
 #[test]
 fn test_role_fromstr_invalid() {
-    let result = "admin".parse::<Role>();
+    let result = "server".parse::<Role>();
     assert!(result.is_err());
     let result = " ".parse::<Role>();
     assert!(result.is_err());
@@ -34,7 +34,6 @@ fn test_user_new_generates_id() {
     assert_eq!(user.get_name(), "alice");
     assert!(user.get_id() != 0); // Non-zero ID generated
     assert_eq!(user.get_role(), None);
-    assert_eq!(user.get_addr(), None);
 }
 
 #[test]
@@ -87,13 +86,10 @@ fn test_user_setters() {
     let mut user = User::new("key".to_string(), "initial".to_string());
     
     // Test setters work
-    let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080);
-    user.set_role(Role::Client);
-    user.set_addr(addr);
+    user.set_role(Role::Member);
     
     // Verify getters
-    assert_eq!(user.get_role(), Some(Role::Client));
-    assert_eq!(user.get_addr(), Some(addr));
+    assert_eq!(user.get_role(), Some(Role::Member));
 }
 
 #[test]
@@ -101,7 +97,7 @@ fn test_user_setters_dont_change_id() {
     let mut user = User::new("key".to_string(), "initial".to_string());
     let original_id = user.get_id();
     
-    user.set_role(Role::Server);
+    user.set_role(Role::Admin);
     
     // ID remains stable (computed at creation from key+name)
     assert_eq!(user.get_id(), original_id);

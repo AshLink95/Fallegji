@@ -30,8 +30,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                role TEXT CHECK(role IN ('server', 'client')),
-                addr TEXT
+                role TEXT CHECK(role IN ('admin', 'member'))
             )",
             [],
         )?;
@@ -58,8 +57,8 @@ impl Database {
             let user = User::new(key, name.clone());
             let conn = conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO users (id, name, role, addr) VALUES (?1, ?2, ?3, ?4)",
-                params![ user.get_id().to_string(), name, None::<&str>, None::<&str> ],
+                "INSERT INTO users (id, name, role) VALUES (?1, ?2, ?3)",
+                params![ user.get_id().to_string(), name, None::<&str> ],
             )?;
             Ok( user )
         }).await?
@@ -80,7 +79,7 @@ impl Database {
 
             let message_id = conn.last_insert_rowid() as i32;
             let mut stmt = conn.prepare(
-                "SELECT m.sent_at, u.id, u.name, u.role, u.addr 
+                "SELECT m.sent_at, u.id, u.name, u.role
                  FROM messages m 
                  JOIN users u ON m.sender_id = u.id 
                  WHERE m.id = ?1"
@@ -103,7 +102,7 @@ impl Database {
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare(
-                "SELECT id, name, role, addr FROM users WHERE id = ?1"
+                "SELECT id, name, role FROM users WHERE id = ?1"
             )?;
 
             let key = String::from("rand"); //dbg: key will be fetched from tunnels, using corresponding user id
@@ -112,7 +111,6 @@ impl Database {
                 let name: String = row.get(1)?;
                 let mut user = User::new(key, name);
                 if let Some(r) = row.get::<_, Option<String>>(2)?.map(|s| s.parse().unwrap()) { user.set_role(r); }
-                if let Some(a) = row.get::<_, Option<String>>(3)?.and_then(|s| s.parse().ok()) { user.set_addr(a); }
                 Ok(user)
             })?;
             
@@ -145,37 +143,6 @@ impl Database {
     }
 
     //TODO: (CR)UD & list_all/load_all for both users and messages
-pub async fn load_all(&self, mut loaded: Vec<(String, String, i64)>) -> Result<Vec<(String, String, i64)>> {
-    let conn = Arc::clone(&self.conn);
-    
-    // Get the last timestamp from loaded messages, or 0 if empty
-    let last_timestamp = loaded.last().map(|(_, _, ts)| *ts).unwrap_or(0);
-    
-    task::spawn_blocking(move || {
-        let conn = conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT u.name, m.contents, m.sent_at 
-             FROM messages m 
-             JOIN users u ON m.sender_id = u.id 
-             WHERE m.sent_at > ?1
-             ORDER BY m.sent_at ASC"
-        )?;
-        
-        let new_messages = stmt.query_map(params![last_timestamp], |row| {
-            Ok((
-                row.get::<_, String>(0)?, // sender_name
-                row.get::<_, String>(1)?, // message_contents
-                row.get::<_, i64>(2)?,    // time_sent (sent_at)
-            ))
-        })?;
-        
-        for message in new_messages {
-            loaded.push(message?);
-        }
-        
-        Ok(loaded)
-    }).await?
-}
 }
 
 // impl ServerDB for Database {
