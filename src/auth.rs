@@ -43,12 +43,12 @@ pub trait Authentication { // currently only works on linux
 }
 
 /// Contains server user-sepcific methods
-pub trait Server { //TODO: requires tunneling
+pub trait Server { //TODO: requires connection
     fn init_server(&mut self); // creates a new user (has key) with an addr
 }
 
 /// Contains client user-sepcific methods
-pub trait Client { //TODO: requires tunneling
+pub trait Client { //TODO: requires connection
     fn connect_client(&mut self); // creates a new user (has key) with an addr
 }
 

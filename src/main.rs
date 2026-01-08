@@ -1,6 +1,6 @@
-mod db;         //TODO: (will change again to add tunneling)
-mod tunneling;  //TODO
-mod messaging;  //TODO: dependant on tunneling
+mod db;         //TODO: (will change again to add connection)
+mod connection; //TODO
+mod messaging;  //TODO: dependant on connection
 mod ui_screens; //TODO: dependant on messaging
 mod app;        //TODO: dependant on everything (might build a manager)
 mod logging;    //TODO: last

@@ -42,7 +42,7 @@ async fn test_create_read_message() -> Result<()> {
     let msg: Message = db.create_message(user.get_id(), "Hello world!".to_string()).await?;
     assert_eq!(msg.get_contents(), "Hello world!");
     assert!(msg.get_id() > 0);
-    assert!(msg.get_created_at() > 0);
+    assert!(msg.get_sent_at() > 0);
     
     // // Read message
     // let read_msg = db.read_message(msg.id).await?;

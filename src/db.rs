@@ -3,18 +3,18 @@ use tokio::task;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
-use crate::{auth::User, messaging::Message}; //TODO: will include tunneling also
+use crate::{auth::User, messaging::Message}; //TODO: will include connection also
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-pub trait ServerDB { //TODO: requires messaging and tunneling
+pub trait ServerDB { //TODO: requires messaging and connection
     fn sync_clients(&self) -> Result<()>;
     fn listen_to_clients(&self) -> Result<()>;
 }
 
-pub trait ClientDB { //TODO: requires messaging and tunneling
+pub trait ClientDB { //TODO: requires messaging and connection
     fn sync_with_server(&self) -> Result<()>;
     /// Method invoked after closing chat room to keep clients from manipulating it
     fn lock_client_copy(&self) -> Result<()>;
@@ -41,7 +41,7 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_id TEXT NOT NULL,
                 contents TEXT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                sent_at INTEGER DEFAULT (strftime('%s', 'now')),
                 FOREIGN KEY (sender_id) REFERENCES users(id)
             )",
             [],
@@ -80,7 +80,7 @@ impl Database {
 
             let message_id = conn.last_insert_rowid() as i32;
             let mut stmt = conn.prepare(
-                "SELECT m.created_at, u.id, u.name, u.role, u.addr 
+                "SELECT m.sent_at, u.id, u.name, u.role, u.addr 
                  FROM messages m 
                  JOIN users u ON m.sender_id = u.id 
                  WHERE m.id = ?1"
@@ -127,16 +127,16 @@ impl Database {
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare(
-                "SELECT id, sender_id, contents, created_at FROM messages WHERE id = ?1"
+                "SELECT id, sender_id, contents, sent_at FROM messages WHERE id = ?1"
             )?;
             
             let message = stmt.query_row(params![id], |row| {
                 let id = row.get(0)?;
                 let sender_id = row.get::<_, String>(1)?.parse().unwrap();
                 let contents = row.get(2)?;
-                let created_at = row.get(3)?;
+                let sent_at = row.get(3)?;
                 let mut message = Message::new(id, sender_id, contents);
-                message.set_date(created_at);
+                message.set_date(sent_at);
                 Ok(message)
             })?;
             
@@ -145,6 +145,37 @@ impl Database {
     }
 
     //TODO: (CR)UD & list_all/load_all for both users and messages
+pub async fn load_all(&self, mut loaded: Vec<(String, String, i64)>) -> Result<Vec<(String, String, i64)>> {
+    let conn = Arc::clone(&self.conn);
+    
+    // Get the last timestamp from loaded messages, or 0 if empty
+    let last_timestamp = loaded.last().map(|(_, _, ts)| *ts).unwrap_or(0);
+    
+    task::spawn_blocking(move || {
+        let conn = conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT u.name, m.contents, m.sent_at 
+             FROM messages m 
+             JOIN users u ON m.sender_id = u.id 
+             WHERE m.sent_at > ?1
+             ORDER BY m.sent_at ASC"
+        )?;
+        
+        let new_messages = stmt.query_map(params![last_timestamp], |row| {
+            Ok((
+                row.get::<_, String>(0)?, // sender_name
+                row.get::<_, String>(1)?, // message_contents
+                row.get::<_, i64>(2)?,    // time_sent (sent_at)
+            ))
+        })?;
+        
+        for message in new_messages {
+            loaded.push(message?);
+        }
+        
+        Ok(loaded)
+    }).await?
+}
 }
 
 // impl ServerDB for Database {
