@@ -2,7 +2,7 @@ use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
 use zeromq::RouterSocket;
-use x25519_dalek::{StaticSecret, PublicKey};
+use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
 // use chacha20poly1305;
 // use tokio::{task, time::{sleep, Duration, interval}};
@@ -23,7 +23,7 @@ pub struct Peer {
 
 pub struct Connection {
     prvkey: StaticSecret,
-    peers: Arc<Mutex<HashMap<u64, Peer>>>, // user_id -> Peer
+    peers: Arc<Mutex<HashMap<u64, (Peer, SharedSecret)>>>, // user_id -> Peer, shrdkey
     socket: RouterSocket,
     rendezvous: SocketAddr
 }
@@ -31,13 +31,14 @@ pub struct Connection {
 /// key generation
 pub trait KeyGen {
     fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
+    fn shrdkeygen(&self, prvkey: StaticSecret) -> SharedSecret;
 }
 
-/// verification and checking of new peers
+/// verification and checking of new peers [TODO]
 trait Verif { }
-/// rendez-vous server fallback (where to meet and automatically route)
+/// rendez-vous server fallback (where to meet and automatically route) [TODO]
 trait RendezVous { }
-/// direct connection, keepalive and reconnect (default mode)
+/// direct connection, keepalive and reconnect (default mode) [TODO]
 trait Stable { }
 
 impl Peer {
@@ -102,5 +103,10 @@ impl KeyGen for Peer {
         let prvkey = StaticSecret::from(noise);
         let pubkey = PublicKey::from(&prvkey);
         Ok((pubkey, prvkey))
+    }
+
+    fn shrdkeygen(&self, prvkey: StaticSecret) -> SharedSecret {
+        let pubkey = self.pubkey;
+        prvkey.diffie_hellman(&pubkey)
     }
 }

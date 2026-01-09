@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use zeromq;
-use tokio::task;
+use x25519_dalek::SharedSecret;
+// use zeromq;
+// use chacha20poly1305;
+// use tokio::task;
 use time::OffsetDateTime;
 use crate::{auth::User, connection::Peer, db::Database};
 
@@ -14,7 +16,7 @@ pub struct Message {
 pub struct Chat {
     message_history: Vec<Message>,
     members: HashMap<u64, User>, // user_id -> User
-    peers: HashMap<u64, Peer>, // user_id -> Peer
+    peers: HashMap<u64, (Peer, SharedSecret)>, // user_id -> Peer, shrdkey
     current_user: User,
     db: Database
 }

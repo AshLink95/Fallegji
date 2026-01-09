@@ -1,5 +1,5 @@
 use std::{fmt, str};
-use nix::unistd::{getuid, Uid};
+use nix::unistd::Uid;
 use sha2::{Digest, Sha256};
 use anyhow::Result;
 
