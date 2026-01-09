@@ -1,7 +1,9 @@
+use hex::ToHex;
 use nix::unistd::Uid;
 use rusqlite::{Connection, params};
 use tokio::task;
-use anyhow::{Result, Error, bail};
+use anyhow::{Result, bail};
+use x25519_dalek::StaticSecret;
 use std::sync::{Arc, Mutex};
 
 use crate::{auth::{Authentication, User}, messaging::Message, connection::Peer};
@@ -78,10 +80,20 @@ impl Database {
         }).await?
     }
     /// Peer creation
-    pub async fn create_peer(&self, port: u16) -> Result<(Peer, [u8; 32])> {
+    pub async fn create_peer(&self, port: u16) -> Result<(Peer, StaticSecret)> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
-            let (mut peer, prvkey) = Peer::new_out(0, port)?;
+            let conn = conn.lock().unwrap();
+            let (mut peer, prvkey) = Peer::new_out(-1, port)?;
+            let pubkey = peer.get_pubkey().to_bytes().encode_hex::<String>();
+
+            conn.execute(
+                "INSERT INTO peers (user_id, addr, pubkey) VALUES (?1, ?2, ?3)",
+                params![None::<String>, peer.get_addr().to_string(), pubkey]
+            )?;
+            let id = conn.last_insert_rowid() as i32;
+            peer.set_id(id);
+            
             Ok((peer, prvkey))
         }). await?
     }
@@ -149,7 +161,7 @@ impl Database {
             Ok(user)
         }).await?
     }
-
+    //TODO: Peer instance reader from id
     /// Message instance reader from id
     pub async fn read_message(&self, id: i32) -> Result<Message> {
         let conn = Arc::clone(&self.conn);

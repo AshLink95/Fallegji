@@ -3,7 +3,6 @@ mod connection; //TODO
 mod messaging;  //TODO: dependant on connection
 mod ui_screens; //TODO: dependant on messaging
 mod app;        //TODO: dependant on everything (might build a manager)
-mod logging;    //TODO: last
 
 mod auth;
 mod vim;

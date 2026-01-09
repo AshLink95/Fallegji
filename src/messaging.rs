@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use zmq;
+use zeromq;
 use tokio::task;
 use time::OffsetDateTime;
 use crate::{auth::User, connection::Peer, db::Database};

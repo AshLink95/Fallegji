@@ -1,8 +1,10 @@
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
-use zmq::{Socket, CurveKeyPair};
+use zeromq::RouterSocket;
+use x25519_dalek::{StaticSecret, PublicKey};
 use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
+// use chacha20poly1305;
 // use tokio::{task, time::{sleep, Duration, interval}};
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
@@ -15,21 +17,20 @@ pub struct Peer {
     id: i32,
     user_id: Option<u64>, // Users get created after peers
     addr: SocketAddr,
-    pubkey: [u8; 32],
+    pubkey: PublicKey,
     last_heartbeat: Option<i64> // peer online if None
 }
 
 pub struct Connection {
-    prvkey: [u8; 32],
-    context: Arc<zmq::Context>,
+    prvkey: StaticSecret,
     peers: Arc<Mutex<HashMap<u64, Peer>>>, // user_id -> Peer
-    socket: Socket, // Lives in one thread/task
+    socket: RouterSocket,
     rendezvous: SocketAddr
 }
 
 /// key generation
 pub trait KeyGen {
-    fn keypairgen() -> Result<CurveKeyPair>;
+    fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
 }
 
 /// verification and checking of new peers
@@ -41,7 +42,7 @@ trait Stable { }
 
 impl Peer {
     /// new created peer
-    pub fn new_out(id: i32, port: u16) -> Result<(Self, [u8; 32])> {
+    pub fn new_out(id: i32, port: u16) -> Result<(Self, StaticSecret)> {
         // using UDP trick to get appropriate local IP peers can use
         let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
         tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
@@ -53,13 +54,13 @@ impl Peer {
             id,
             user_id: None,
             addr,
-            pubkey: keypair.public_key,
+            pubkey: keypair.0,
             last_heartbeat: None
-        }, keypair.secret_key ))
+        }, keypair.1 ))
     }
 
     /// new imported peer
-    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addr: SocketAddr, pubkey: [u8; 32], last_heartbeat: Option<i64>) -> Result<Self> {
+    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addr: SocketAddr, pubkey: PublicKey, last_heartbeat: Option<i64>) -> Result<Self> {
         let key: String = pubkey.encode_hex();
         let user = User::new(key.clone(), peer_name.clone(), peer_uid);
         if user.ver_id(key, peer_user_id) {
@@ -68,15 +69,14 @@ impl Peer {
             Err(Error::msg("Invalid key or user"))
         }
     }
-
     
     pub fn get_id(&self) -> i32 { self.id }
     pub fn get_user_id(&self) -> Option<u64> { self.user_id }
     pub fn get_addr(&self) -> SocketAddr { self.addr }
-    pub fn get_pubkey(&self) -> [u8; 32] { self.pubkey }
+    pub fn get_pubkey(&self) -> PublicKey { self.pubkey }
     pub fn get_last_heartbeat(&self) -> Option<i64> { self.last_heartbeat }
 
-    pub fn set_id(&mut self, id: i32) { self.id = id }
+    pub fn set_id(&mut self, id: i32) { if self.id < 0 { self.id = id } }
     pub fn set_user_id(&mut self, user_name: String, user_id: u64, user_uid: Uid) -> Result<()> {
         if self.user_id.is_some() {
             return Err(Error::msg("User ID already set"))
@@ -96,7 +96,11 @@ impl Peer {
 }
 
 impl KeyGen for Peer {
-    fn keypairgen() -> Result<CurveKeyPair> {
-        CurveKeyPair::new().map_err(Error::new)
+    fn keypairgen() -> Result<(PublicKey, StaticSecret)> {
+        let mut noise = [0u8; 32];
+        getrandom::fill(&mut noise[..]).map_err(Error::new)?;
+        let prvkey = StaticSecret::from(noise);
+        let pubkey = PublicKey::from(&prvkey);
+        Ok((pubkey, prvkey))
     }
 }

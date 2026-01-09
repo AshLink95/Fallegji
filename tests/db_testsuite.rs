@@ -2,15 +2,17 @@
 use fallegji::db::Database;
 use fallegji::auth::{User, Authentication};
 use fallegji::messaging::Message;
+use fallegji::connection::Peer;
+use hex::ToHex;
 use nix::unistd::getuid;
 use tokio::fs;
 use anyhow::Result;
+use x25519_dalek::StaticSecret;
 
 #[tokio::test]
 async fn test_create_read_user() -> Result<()> {
     let db_path = "test.db";
     fs::remove_file(db_path).await.ok();
-    
     let db: Database = Database::new(db_path)?;
     
     // Create
@@ -30,10 +32,39 @@ async fn test_create_read_user() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_create_read_peer() -> Result<()> {
+    let db_path = "test.db";
+    fs::remove_file(db_path).await.ok();
+    let db: Database = Database::new(db_path)?;
+    
+    // Create
+    let (created, prv_key): (Peer, StaticSecret) = db.create_peer(6967).await?;
+    assert!(created.get_id() > 0);
+    assert!(!created.get_addr().ip().is_loopback());
+    assert_eq!(created.get_addr().port(), 6967);
+    assert_eq!(created.get_user_id(), None);
+    assert_eq!(created.get_last_heartbeat(), None);
+
+    let prvkey = prv_key.to_bytes();
+    let pubkey = created.get_pubkey().to_bytes();
+    assert!(!pubkey.iter().all(|&b| b == 0));
+    assert!(!prvkey.iter().all(|&b| b == 0));
+    
+    // // Read
+    // let read_user = db.read_user(user_id).await?;
+    // assert!(read_user.is_some());
+    // let user = read_user.unwrap();
+    // assert_eq!(user.id, user_id);
+    // assert_eq!(user.name, "alice");
+    //
+    // fs::remove_file(db_path).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_create_read_message() -> Result<()> {
     let db_path = "test.db";
     fs::remove_file(db_path).await.ok();
-    
     let db: Database = Database::new(db_path)?;
     
     // Setup user first
