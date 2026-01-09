@@ -59,14 +59,39 @@ impl Peer {
     }
 
     /// new imported peer
-    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, addr: SocketAddr, pubkey: [u8; 32], last_heartbeat: Option<i64>) -> Result<Self> {
+    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addr: SocketAddr, pubkey: [u8; 32], last_heartbeat: Option<i64>) -> Result<Self> {
         let key: String = pubkey.encode_hex();
         let user = User::new(key.clone(), peer_name.clone(), peer_uid);
-        if user.ver_id(key, &peer_name) {
+        if user.ver_id(key, peer_user_id) {
             Ok(Self {id, user_id: None, addr, pubkey, last_heartbeat})
         } else {
             Err(Error::msg("Invalid key or user"))
         }
+    }
+
+    
+    pub fn get_id(&self) -> i32 { self.id }
+    pub fn get_user_id(&self) -> Option<u64> { self.user_id }
+    pub fn get_addr(&self) -> SocketAddr { self.addr }
+    pub fn get_pubkey(&self) -> [u8; 32] { self.pubkey }
+    pub fn get_last_heartbeat(&self) -> Option<i64> { self.last_heartbeat }
+
+    pub fn set_id(&mut self, id: i32) { self.id = id }
+    pub fn set_user_id(&mut self, user_name: String, user_id: u64, user_uid: Uid) -> Result<()> {
+        if self.user_id.is_some() {
+            return Err(Error::msg("User ID already set"))
+        }
+        let key: String = self.pubkey.encode_hex();
+        let user = User::new(key.clone(), user_name, user_uid);
+        if !user.ver_id(key, user_id) {
+            return Err(Error::msg("Invalid user data"))
+        }
+        self.user_id = Some(user_id);
+        Ok(())
+    }
+    pub fn set_addr(&mut self, addr: SocketAddr) { self.addr = addr }
+    pub fn set_last_heartbeat(&mut self, last_heartbeat: Option<i64>) {
+        self.last_heartbeat = last_heartbeat;
     }
 }
 

@@ -38,7 +38,7 @@ pub trait Authentication { // currently only works on linux
     fn gen_id(key: String, name: &str, uid: Uid) -> u64;
     /// method to verify id
     /// The key argument needs to be the tunnel (wireguard/boringTUN) public key
-    fn ver_id(&self, key: String, name: &str) -> bool;
+    fn ver_id(&self, key: String, user_id: u64) -> bool;
 }
 
 impl User {
@@ -71,9 +71,9 @@ impl Authentication for User {
         id
     }
 
-    fn ver_id(&self, key: String, name: &str) -> bool {
+    fn ver_id(&self, key: String, user_id: u64) -> bool {
         let uid = self.uid;
-        let to_hash = key + name + &uid.to_string();
+        let to_hash = key + &self.name + &uid.to_string();
         let mut hasher = Sha256::new();
         hasher.update(to_hash.as_bytes());
         let res = hasher.finalize();
@@ -84,6 +84,6 @@ impl Authentication for User {
             id ^= u64::from_be_bytes(bytes);
         }
 
-        id == self.id
+        id == self.id && id == user_id
     }
 }

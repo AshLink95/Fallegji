@@ -15,7 +15,7 @@ async fn test_create_read_user() -> Result<()> {
     
     // Create
     let created: User = db.create_user("a1*".to_string(), "alice".to_string(), getuid()).await?;
-    assert!(created.ver_id("a1*".to_string(), "alice"));
+    assert!(created.ver_id("a1*".to_string(), created.get_id()));
     assert_eq!(created.get_name(), "alice");
     
     // // Read

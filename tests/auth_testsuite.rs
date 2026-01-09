@@ -47,7 +47,7 @@ fn test_user_ver_id_roundtrip() {
     let id = user.get_id();
     
     // Verify with same key+name
-    assert!(user.ver_id(pub_key.clone(), name));
+    assert!(user.ver_id(pub_key.clone(), id));
     
     // Verify deterministic: same inputs = same ID
     let user2 = User::new(pub_key.clone(), name.to_string(), uid);
@@ -63,10 +63,7 @@ fn test_user_ver_id_wrong_key() {
     let user = User::new("key1".to_string(), "alice".to_string(), Uid::from_raw(0));
     
     // Wrong key → fails
-    assert!(!user.ver_id("wrong_key".to_string(), "alice"));
-    
-    // Wrong name → fails  
-    assert!(!user.ver_id("key1".to_string(), "bob"));
+    assert!(!user.ver_id("wrong_key".to_string(), user.get_id()));
 }
 
 #[test]
@@ -80,8 +77,8 @@ fn test_user_ver_id_same_uid() {
     
     // Same key+name+uid → same ID
     assert_eq!(user1.get_id(), user2.get_id());
-    assert!(user1.ver_id(pub_key.to_string(), name));
-    assert!(user2.ver_id(pub_key.to_string(), name));
+    assert!(user1.ver_id(pub_key.to_string(), user1.get_id()));
+    assert!(user2.ver_id(pub_key.to_string(), user2.get_id()));
 }
 
 #[test]
@@ -145,5 +142,5 @@ fn test_ver_id_symmetry() {
     let computed_id = User::gen_id(pub_key.to_string(), name, uid);
     
     assert_eq!(user.get_id(), computed_id);
-    assert!(user.ver_id(pub_key.to_string(), name));
+    assert!(user.ver_id(pub_key.to_string(), computed_id));
 }

@@ -4,7 +4,7 @@ use tokio::task;
 use anyhow::{Result, Error, bail};
 use std::sync::{Arc, Mutex};
 
-use crate::{auth::{Authentication, User}, messaging::Message}; //TODO: will include connection also
+use crate::{auth::{Authentication, User}, messaging::Message, connection::Peer};
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -38,6 +38,18 @@ impl Database {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS peers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                addr TEXT NOT NULL,
+                pubkey BLOB NOT NULL,
+                last_heartbeat INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_id TEXT NOT NULL,
@@ -64,6 +76,14 @@ impl Database {
             )?;
             Ok( user )
         }).await?
+    }
+    /// Peer creation
+    pub async fn create_peer(&self, port: u16) -> Result<(Peer, [u8; 32])> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let (mut peer, prvkey) = Peer::new_out(0, port)?;
+            Ok((peer, prvkey))
+        }). await?
     }
     /// Message creation
     pub async fn create_message(&self, sender_id: u64, contents: String) -> Result<Message> {
@@ -122,7 +142,7 @@ impl Database {
                 Ok((user, user_id))
             })?;
 
-            if !user.ver_id(key, &user.get_name()) || user.get_id() != user_id {
+            if !user.ver_id(key, user_id) {
                 bail!("Invalid key or user");
             }
             
