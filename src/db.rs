@@ -12,17 +12,6 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-pub trait ServerDB { //TODO: requires messaging and connection
-    fn sync_clients(&self) -> Result<()>;
-    fn listen_to_clients(&self) -> Result<()>;
-}
-
-pub trait ClientDB { //TODO: requires messaging and connection
-    fn sync_with_server(&self) -> Result<()>;
-    /// Method invoked after closing chat room to keep clients from manipulating it
-    fn lock_client_copy(&self) -> Result<()>;
-}
-
 impl Database {
     /// Database initialization
     /// Exceptionally sync, not async

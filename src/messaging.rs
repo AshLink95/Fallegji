@@ -35,9 +35,8 @@ impl Message {
 }
 
 
-//TODO: listening for messages
-//TODO: sending messages
-//TODO: presence update
-//TODO: typing_indicators - show when peer is typing
-//TODO: read_receipts - notify when messages are seen
+//TODO: sending and receiving messages
+//TODO: presence update (if last heartbeat is None, users are online)
+//TODO: typing_indicators - show when peer is typing (special message packets)
+//TODO: read_receipts - notify when messages are seen (last heartbeat time > sent time)
 //TODO: db syncs (when connecting and when exiting only)
