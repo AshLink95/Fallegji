@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use chacha20poly1305::Key;
+use std::{collections::HashMap, sync::{Arc, RwLock}};
 // use zeromq;
 // use tokio::task;
 use time::OffsetDateTime;
@@ -13,9 +12,9 @@ pub struct Message {
 }
 
 pub struct Chat {
-    message_history: Vec<Message>,
-    members: HashMap<u64, User>, // user_id -> User
-    peers: HashMap<u64, (Peer, Key)>, // user_id -> Peer, shrdkey
+    message_history: Arc<RwLock<Vec<Message>>>,
+    members: Arc<RwLock<HashMap<u64, User>>>, // user_id -> User
+    peers: Arc<RwLock<HashMap<u64, Peer>>>, // user_id -> Peer
     current_user: User,
     db: Database
 }

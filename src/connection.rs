@@ -1,10 +1,10 @@
+use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
 use sha2::Sha256;
-use zeromq::RouterSocket;
+use zeromq::{DealerSocket, RouterSocket};
 use x25519_dalek::{PublicKey, StaticSecret};
-use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
 use hkdf::Hkdf;
 use chacha20poly1305::Key;
 // use tokio::{task, time::{sleep, Duration, interval}};
@@ -23,25 +23,29 @@ pub struct Peer {
     last_heartbeat: Option<i64> // peer online if None
 }
 
-pub struct Connection {
-    prvkey: StaticSecret,
-    peers: Arc<Mutex<HashMap<u64, (Peer, Key)>>>, // user_id -> Peer, shrdkey
-    socket: RouterSocket,
-    rendezvous: SocketAddr
-}
-
 /// key generation
 pub trait KeyGen {
     fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
     fn shrdkeygen(&self, prvkey: StaticSecret) -> Key;
 }
 
-/// verification and checking of new peers [TODO]
-trait Verif { }
+/// user_id -> peer, key, socket
+type Peermap = HashMap<u64, (Peer, Key, DealerSocket)>;
+
+pub struct Connection {
+    prvkey: StaticSecret,
+    peers: Arc<Mutex<Peermap>>,
+    rendezvous: (SocketAddr, Option<RouterSocket>)
+}
+
 /// rendez-vous server fallback (where to meet and automatically route) [TODO]
 trait RendezVous { }
+/// initial verification and checking of new peers [TODO]
+trait Verif { }
 /// direct connection, keepalive and reconnect (default mode) [TODO]
 trait Stable { }
+/// Encryption/Decryption and Serialization/Deserialization [TODO]
+trait Communication { }
 
 impl Peer {
     /// new created peer
