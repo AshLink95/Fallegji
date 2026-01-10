@@ -110,6 +110,6 @@ fn test_keygen() {
     let (other_peer, other_prvkey) = Peer::new_out(2, 8081).unwrap();
     let shared1 = peer.shrdkeygen(other_prvkey);
     let shared2 = other_peer.shrdkeygen(peer_prvkey);
-    assert_eq!(shared1.as_bytes(), shared2.as_bytes());
-    assert_eq!(shared1.as_bytes().len(), 32);
+    assert_eq!(shared1.as_slice(), shared2.as_slice());
+    assert_eq!(shared1.as_slice().len(), 32);
 }

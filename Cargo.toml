@@ -9,6 +9,7 @@ chacha20poly1305 = "0.10.1"
 crossterm = "0.29.0"
 getrandom = { version = "0.3.4", features = ["std"] }
 hex = "0.4.3"
+hkdf = "0.12.4"
 lazy_static = "1.5.0"
 nix = { version = "0.30.1", features = ["user"] }
 ratatui = "0.30.0"

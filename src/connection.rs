@@ -1,10 +1,12 @@
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
+use sha2::Sha256;
 use zeromq::RouterSocket;
-use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
+use x25519_dalek::{PublicKey, StaticSecret};
 use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
-// use chacha20poly1305;
+use hkdf::Hkdf;
+use chacha20poly1305::Key;
 // use tokio::{task, time::{sleep, Duration, interval}};
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
@@ -23,7 +25,7 @@ pub struct Peer {
 
 pub struct Connection {
     prvkey: StaticSecret,
-    peers: Arc<Mutex<HashMap<u64, (Peer, SharedSecret)>>>, // user_id -> Peer, shrdkey
+    peers: Arc<Mutex<HashMap<u64, (Peer, Key)>>>, // user_id -> Peer, shrdkey
     socket: RouterSocket,
     rendezvous: SocketAddr
 }
@@ -31,7 +33,7 @@ pub struct Connection {
 /// key generation
 pub trait KeyGen {
     fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
-    fn shrdkeygen(&self, prvkey: StaticSecret) -> SharedSecret;
+    fn shrdkeygen(&self, prvkey: StaticSecret) -> Key;
 }
 
 /// verification and checking of new peers [TODO]
@@ -105,8 +107,12 @@ impl KeyGen for Peer {
         Ok((pubkey, prvkey))
     }
 
-    fn shrdkeygen(&self, prvkey: StaticSecret) -> SharedSecret {
+    fn shrdkeygen(&self, prvkey: StaticSecret) -> Key {
         let pubkey = self.pubkey;
-        prvkey.diffie_hellman(&pubkey)
+        let x_shrdkey = prvkey.diffie_hellman(&pubkey);
+        let hkdf = Hkdf::<Sha256>::new(None, x_shrdkey.as_bytes());
+        let mut shrdkey_b = [0u8; 32];
+        hkdf.expand(b"fallegji", &mut shrdkey_b).unwrap();
+        *Key::from_slice(&shrdkey_b)
     }
 }
