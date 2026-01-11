@@ -1,3 +1,4 @@
+// prompt engineered
 use std::net::SocketAddr;
 use fallegji::db::Database;
 use fallegji::auth::{Authentication, Role, User};
@@ -188,6 +189,48 @@ async fn test_update_message() -> Result<()> {
     
     // Update non-existent message returns false
     let result = db.update_message_contents(99999, "test".to_string()).await?;
+    assert!(!result);
+    
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_delete() -> Result<()> {
+    let db_path = "test.db";
+    let db = Database::new(db_path)?;
+    
+    // Setup: Create user, peer, and message
+    let (peer, _) = db.create_peer(8080).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = db.create_user(pubkey_hex, "delete_test".to_string(), getuid()).await?;
+    db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let msg = db.create_message(user.get_id(), "Test message".to_string()).await?;
+    
+    // Delete message
+    let msg_deleted = db.delete_message(msg.get_id()).await?;
+    assert!(msg_deleted);
+    assert!(db.read_message(msg.get_id()).await?.is_none());
+    
+    // Delete non-existent message returns false
+    let result = db.delete_message(99999).await?;
+    assert!(!result);
+    
+    // Delete peer
+    let peer_deleted = db.delete_peer(peer.get_id()).await?;
+    assert!(peer_deleted);
+    assert!(db.read_peer(peer.get_id()).await?.is_none());
+    
+    // Delete non-existent peer returns false
+    let result = db.delete_peer(99999).await?;
+    assert!(!result);
+    
+    // Delete user
+    let user_deleted = db.delete_user(user.get_id()).await?;
+    assert!(user_deleted);
+    assert!(db.read_user(user.get_id()).await?.is_none());
+    
+    // Delete non-existent user returns false
+    let result = db.delete_user(99999).await?;
     assert!(!result);
     
     Ok(())

@@ -343,5 +343,43 @@ impl Database {
         }).await?
     }
 
-    //TODO: (CRU)D [atomic updates] & list_all/load_all for users, peers and messages
+    // Deletion
+    /// Delete user by id
+    pub async fn delete_user(&self, id: u64) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM users WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Delete peer by id
+    pub async fn delete_peer(&self, id: i32) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM peers WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Delete message by id
+    pub async fn delete_message(&self, id: i32) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM messages WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+
+    //TODO: list_all/load_all and save_all for users, peers and messages
 }
