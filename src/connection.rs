@@ -15,6 +15,7 @@ use chacha20poly1305::Key;
 
 use crate::auth::{Authentication, User};
 
+#[derive(Debug)]
 pub struct Peer {
     id: i32,
     user_id: Option<u64>, // Users get created after peers
@@ -71,7 +72,7 @@ impl Peer {
         let key: String = pubkey.encode_hex();
         let user = User::new(key.clone(), peer_name.clone(), peer_uid);
         if user.ver_id(key, peer_user_id) {
-            Ok(Self {id, user_id: None, addr, pubkey, last_heartbeat})
+            Ok(Self {id, user_id: Some(peer_user_id), addr, pubkey, last_heartbeat})
         } else {
             Err(Error::msg("Invalid key or user"))
         }

@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
-use anyhow::{Result, bail};
-use hex::encode;
+use std::{net::SocketAddr, sync::{Arc, Mutex}};
+use anyhow::{Error, Result, bail};
+use hex::{ToHex, encode};
 use nix::unistd::Uid;
 use rusqlite::{Connection, params};
 use tokio::task;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::{auth::{Authentication, User}, messaging::Message, connection::Peer};
+use crate::{auth::{Authentication, Role, User}, connection::Peer, messaging::Message};
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -172,10 +172,11 @@ impl Database {
                 "SELECT user_id, addr, pubkey, last_heartbeat FROM peers WHERE id = ?1"
             )?;
 
+            let mut stmt_u = conn.prepare(
+                "SELECT name, uid FROM users WHERE id = ?1"
+            )?;
+
             let peer: Peer = match stmt.query_row(params![id], |row| {
-                let mut stmt_u = conn.prepare(
-                    "SELECT name, uid FROM users WHERE id = ?1"
-                )?;
                 let peer_user_id: u64 = match row.get::<_, Option<String>>(0)? {
                     Some(s) => s.parse::<u64>().map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
                     None => return Err(rusqlite::Error::InvalidParameterName("Missing user_id".into())),
@@ -203,6 +204,7 @@ impl Database {
                 Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
                 Err(e) => return Err(e.into()),
             };
+
 
 
             Ok(Some(peer))
@@ -235,14 +237,111 @@ impl Database {
         }).await?
     }
 
-    //TODO: (CR)UD [atomic updates] & list_all/load_all for users, peers and messages
-    pub fn placeholder_linkp2u(&self, user: &User, peer: &Peer) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE peers SET user_id = ?1 WHERE id = ?2",
-            params![user.get_id().to_string(), peer.get_id()],
-        )?;
+    // Update
+    /// Update role in a user
+    pub async fn update_user_role(&self, id: u64, role: Role) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE users SET role = ?1 WHERE id = ?2",
+                params![role.to_string(), id.to_string()],
+            )?;
 
-        Ok(())
+            Ok(conn.changes() > 0)
+        }).await?
     }
+    /// Update user_id in a peer
+    pub async fn update_peer_link_user(&self, id: i32, user_id: u64 ) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt_p = conn.prepare(
+                "SELECT pubkey FROM peers WHERE id = ?1"
+            )?;
+            let mut stmt_u = conn.prepare(
+                "SELECT name, uid FROM users WHERE id = ?1"
+            )?;
+
+            let key: String = match stmt_p.query_row(params![id], |row| {
+                Ok(row.get::<_, [u8; 32]>(0)?.encode_hex())
+            }) {
+                Ok(m) => m,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            let (name, uid): (String, Uid) = match stmt_u.query_row(params![user_id.to_string()], |row| {
+                Ok((row.get(0)?, Uid::from(row.get::<_, u32>(1)?)))
+            }) {
+                Ok(m) => m,
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            let user = User::new(key.clone(), name, uid);
+            if !user.ver_id(key, user_id) {
+                return Ok(false)
+            }
+
+            conn.execute(
+                "UPDATE peers SET user_id = ?1 WHERE id = ?2",
+                params![user_id.to_string(), id],
+            )?;
+
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Update address in a peer
+    pub async fn update_peer_addr(&self, id: i32, addr: SocketAddr) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE peers SET addr = ?1 WHERE id = ?2",
+                params![addr.to_string(), id],
+            )?;
+
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Update last heartbeat in a peer
+    pub async fn update_peer_last_heartbeat(&self, id: i32, last_heartbeat: Option<i64>) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE peers SET last_heartbeat = ?1 WHERE id = ?2",
+                params![last_heartbeat, id],
+            )?;
+
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Update contents in a message
+    pub async fn update_message_contents(&self, id: i32, contents: String) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET contents = ?1 WHERE id = ?2",
+                params![contents, id],
+            )?;
+
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+    /// Update date in a message
+    pub async fn update_message_date(&self, id: i32, date: i64) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET sent_at = ?1 WHERE id = ?2",
+                params![date, id],
+            )?;
+
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+
+    //TODO: (CRU)D [atomic updates] & list_all/load_all for users, peers and messages
 }
