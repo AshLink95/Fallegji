@@ -24,6 +24,7 @@ impl str::FromStr for Role {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct User {
     id: u64,
     name: String,

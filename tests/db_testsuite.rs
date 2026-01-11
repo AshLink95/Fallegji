@@ -235,3 +235,104 @@ async fn test_delete() -> Result<()> {
     
     Ok(())
 }
+
+#[tokio::test]
+async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
+    let db_path = "test.db";
+    let db = Database::new(db_path)?;
+    
+    // Setup: Create multiple users, peers, and messages
+    let (peer1, _) = db.create_peer(8080).await?;
+    let pubkey1_hex = peer1.get_pubkey().to_bytes().encode_hex::<String>();
+    let user1 = db.create_user(pubkey1_hex, "alice".to_string(), getuid()).await?;
+    db.update_peer_link_user(peer1.get_id(), user1.get_id()).await?;
+    
+    let (peer2, _) = db.create_peer(8081).await?;
+    let pubkey2_hex = peer2.get_pubkey().to_bytes().encode_hex::<String>();
+    let user2 = db.create_user(pubkey2_hex, "bob".to_string(), getuid()).await?;
+    db.update_peer_link_user(peer2.get_id(), user2.get_id()).await?;
+    
+    let _ = db.create_message(user1.get_id(), "First message".to_string()).await?;
+    let _ = db.create_message(user2.get_id(), "Second message".to_string()).await?;
+    
+    // Load all users
+    let users = db.load_all_users().await?;
+    assert!(users.len() >= 2);
+    assert!(users.iter().any(|u| u.get_name() == "alice"));
+    assert!(users.iter().any(|u| u.get_name() == "bob"));
+    
+    // Load all peers
+    let peers = db.load_all_peers().await?;
+    assert!(peers.len() >= 2);
+    assert!(peers.iter().any(|p| p.get_addr().port() == 8080));
+    assert!(peers.iter().any(|p| p.get_addr().port() == 8081));
+    
+    // Load all messages (ordered by sent_at)
+    let messages = db.load_all_messages().await?;
+    assert!(messages.len() >= 2);
+    assert!(messages.iter().any(|m| m.get_contents() == "First message"));
+    assert!(messages.iter().any(|m| m.get_contents() == "Second message"));
+    // Verify ordering
+    assert!(messages[0].get_sent_at() <= messages[1].get_sent_at());
+    
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_save_all() -> Result<()> { //ERROR: faulty [TODO: check save fcts]
+    let db_path = "test.db";
+    let db = Database::new(db_path)?;
+
+    // Setup: Create initial data
+    let (peer1, _) = db.create_peer(9000).await?;
+    let pubkey1_hex = peer1.get_pubkey().to_bytes().encode_hex::<String>();
+    let mut user1 = db.create_user(pubkey1_hex.clone(), "charlie".to_string(), getuid()).await?;
+    db.update_peer_link_user(peer1.get_id(), user1.get_id()).await?;
+
+    let msg1 = db.create_message(user1.get_id(), "Original".to_string()).await?;
+
+    // Modify user and create new user
+    user1.set_role(Role::Admin);
+    let (mut peer2, _) = db.create_peer(9001).await?;
+    let pubkey2_hex = peer2.get_pubkey().to_bytes().encode_hex::<String>();
+    let user2 = User::new(pubkey2_hex.clone(), "dave".to_string(), getuid());
+    peer2.set_user_id(user2.get_name(), user2.get_id(), user2.get_uid())?;
+    db.update_peer_link_user(peer2.get_id(), user2.get_id()).await?;
+
+    // Save users (should update user1, add user2, keep existing)
+    let users_saved = db.save_all_users(vec![user1.clone(), user2.clone()]).await?;
+    assert!(users_saved);
+
+    // Verify users saved correctly
+    let loaded_users = db.load_all_users().await?;
+println!("{:?}", loaded_users);     //dbg
+    assert!(loaded_users.len() >= 2);
+    assert!(loaded_users.iter().any(|u| u.get_name() == "charlie" && u.get_role() == Some(Role::Admin)));
+    assert!(loaded_users.iter().any(|u| u.get_name() == "dave"));
+
+    // Create new peer and save (should keep peer1, add new, remove peer2 if we exclude it)
+    let (peer3, _) = db.create_peer(9002).await?;
+    let peers_saved = db.save_all_peers(vec![peer1.clone(), peer3.clone()]).await?;
+    assert!(peers_saved);
+
+    // Verify peers saved correctly
+    let loaded_peers = db.load_all_peers().await?;
+    assert!(loaded_peers.iter().any(|p| p.get_id() == peer1.get_id()));
+    assert!(loaded_peers.iter().any(|p| p.get_id() == peer3.get_id()));
+    assert!(!loaded_peers.iter().any(|p| p.get_id() == peer2.get_id())); // peer2 removed
+
+    // Create new message and save (should keep msg1, add new)
+    let mut msg2 = Message::new(-1, user1.get_id(), "New message".to_string());
+    msg2.set_date(msg1.get_sent_at() + 100);
+
+    let messages_saved = db.save_all_messages(vec![msg1.clone(), msg2.clone()]).await?;
+    assert!(messages_saved);
+
+    // Verify messages saved correctly
+    let loaded_messages = db.load_all_messages().await?;
+    assert!(loaded_messages.len() >= 2);
+    assert_eq!(loaded_messages[0].get_contents(), "Original");
+    assert_eq!(loaded_messages[1].get_contents(), "New message");
+
+    Ok(())
+}

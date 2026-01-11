@@ -15,7 +15,7 @@ use chacha20poly1305::Key;
 
 use crate::auth::{Authentication, User};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Peer {
     id: i32,
     user_id: Option<u64>, // Users get created after peers

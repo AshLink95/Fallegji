@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::{Arc, Mutex}};
+use std::{collections::HashSet, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::{Error, Result, bail};
 use hex::{ToHex, encode};
 use nix::unistd::Uid;
@@ -381,5 +381,342 @@ impl Database {
         }).await?
     }
 
-    //TODO: list_all/load_all and save_all for users, peers and messages
+    // Loading
+    /// Loading all users from DB
+    pub async fn load_all_users(&self) -> Result<Vec<User>> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM users"
+            )?;
+            
+            let user_ids: Vec<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            let mut users = Vec::new();
+            for id_str in user_ids {
+                let id: u64 = id_str.parse().unwrap();
+                
+                // Get pubkey from peers
+                let mut stmt_k = conn.prepare(
+                    "SELECT pubkey FROM peers WHERE user_id = ?1"
+                )?;
+                let key: String = match stmt_k.query_row(params![&id_str], |row| {
+                    let pubkey_bytes: Vec<u8> = row.get(0)?;
+                    Ok(hex::encode(pubkey_bytes))
+                }) {
+                    Ok(k) => k,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                
+                // Get user data
+                let mut stmt_u = conn.prepare(
+                    "SELECT name, role, uid FROM users WHERE id = ?1"
+                )?;
+                let user: User = match stmt_u.query_row(params![&id_str], |row| {
+                    let name: String = row.get(0)?;
+                    let uid: Uid = Uid::from(row.get::<_, u32>(2)?);
+                    let mut user = User::new(key.clone(), name, uid);
+                    if let Some(r) = row.get::<_, Option<String>>(1)?.map(|s| s.parse().unwrap()) {
+                        user.set_role(r);
+                    }
+                    Ok(user)
+                }) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                
+                if user.ver_id(key, id) {
+                    users.push(user);
+                }
+            }
+            
+            Ok(users)
+        }).await?
+    }
+
+    /// Loading all peers from DB
+    pub async fn load_all_peers(&self) -> Result<Vec<Peer>> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM peers"
+            )?;
+            
+            let peer_ids: Vec<i32> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            let mut peers = Vec::new();
+            for id in peer_ids {
+                let mut stmt_p = conn.prepare(
+                    "SELECT user_id, addr, pubkey, last_heartbeat FROM peers WHERE id = ?1"
+                )?;
+                
+                let peer: Option<Peer> = stmt_p.query_row(params![id], |row| {
+                       let peer_user_id: u64 = match row.get::<_, Option<String>>(0)? {
+                           Some(s) => s.parse::<u64>().map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+                           None => return Err(rusqlite::Error::InvalidParameterName("Missing user_id".into())),
+                       };
+                       
+                       let mut stmt_u = conn.prepare(
+                           "SELECT name, uid FROM users WHERE id = ?1"
+                       )?;
+                       let user_id: String = peer_user_id.to_string();
+                       let (peer_name, peer_uid): (String, Uid) = match stmt_u.query_row(params![user_id], |row| {
+                           let name: String = row.get::<_, String>(0)?;
+                           let uid: Uid = Uid::from(row.get::<_, u32>(1)?);
+                           Ok((name, uid))
+                       }) {
+                           Ok((n, u)) => (n, u),
+                           Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                           Err(e) => return Err(e),
+                       };
+                       
+                       let addr_str: String = row.get(1)?;
+                       let addr = addr_str.parse().map_err(|e: std::net::AddrParseError| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                       let pubkey_bytes: Vec<u8> = row.get(2)?;
+                       let pubkey_array: [u8; 32] = pubkey_bytes.try_into()
+                           .map_err(|_| rusqlite::Error::InvalidParameterName("Invalid pubkey length".into()))?;
+                       let pubkey = PublicKey::from(pubkey_array);
+                       let last_heartbeat = row.get::<_, Option<i64>>(3)?;
+                       
+                       let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, last_heartbeat)
+                           .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                       Ok(Some(peer))
+                   }).unwrap_or_default();
+                
+                if let Some(p) = peer {
+                    peers.push(p);
+                }
+            }
+            
+            Ok(peers)
+        }).await?
+    }
+
+    /// Loading all messages from DB (ordered by sent_at)
+    pub async fn load_all_messages(&self) -> Result<Vec<Message>> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM messages ORDER BY sent_at ASC"
+            )?;
+            
+            let message_ids: Vec<i32> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            let mut messages = Vec::new();
+            for id in message_ids {
+                let mut stmt_m = conn.prepare(
+                    "SELECT sender_id, contents, sent_at FROM messages WHERE id = ?1"
+                )?;
+                
+                let message: Message = match stmt_m.query_row(params![id], |row| {
+                    let sender_id = row.get::<_, String>(0)?.parse().unwrap();
+                    let contents = row.get(1)?;
+                    let sent_at = row.get(2)?;
+                    let mut message = Message::new(id, sender_id, contents);
+                    message.set_date(sent_at);
+                    Ok(message)
+                }) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                
+                messages.push(message);
+            }
+            
+            Ok(messages)
+        }).await?
+    }
+
+    // Saving
+    /// Saving all users to DB
+    pub async fn save_all_users(&self, users: Vec<User>) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            
+            // Get existing user IDs
+            let mut stmt = conn.prepare("SELECT id FROM users")?;
+            let existing_ids: HashSet<String> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            
+            // Build set of new user IDs
+            let new_ids: HashSet<String> = users.iter()
+                .map(|u| u.get_id().to_string())
+                .collect();
+            
+            // Delete users not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM users WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert/Update new users
+            for user in users {
+                // Get pubkey for verification
+                let mut stmt_k = conn.prepare(
+                    "SELECT pubkey FROM peers WHERE user_id = ?1"
+                )?;
+                let key: String = match stmt_k.query_row(params![user.get_id().to_string()], |row| {
+                    let pubkey_bytes: Vec<u8> = row.get(0)?;
+                    Ok(hex::encode(pubkey_bytes))
+                }) {
+                    Ok(k) => k,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => continue, // Skip if no peer found
+                    Err(e) => return Err(e.into()),
+                };
+                
+                // Verify user before insert/update
+                if !user.ver_id(key, user.get_id()) {
+                    continue; // Skip invalid users
+                }
+                
+                let id_str = user.get_id().to_string();
+                if existing_ids.contains(&id_str) {
+                    // Update existing
+                    conn.execute(
+                        "UPDATE users SET name = ?1, role = ?2, uid = ?3 WHERE id = ?4",
+                        params![
+                            user.get_name(),
+                            user.get_role().map(|r| r.to_string()),
+                            user.get_uid().as_raw(),
+                            id_str
+                        ],
+                    )?;
+                } else {
+                    // Insert new
+                    conn.execute(
+                        "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            id_str,
+                            user.get_name(),
+                            user.get_role().map(|r| r.to_string()),
+                            user.get_uid().as_raw()
+                        ],
+                    )?;
+                }
+            }
+            
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+
+    /// Saving all peers to DB
+    pub async fn save_all_peers(&self, peers: Vec<Peer>) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            
+            // Get existing peer IDs
+            let mut stmt = conn.prepare("SELECT id FROM peers")?;
+            let existing_ids: HashSet<i32> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            
+            // Build set of new peer IDs
+            let new_ids: HashSet<i32> = peers.iter()
+                .map(|p| p.get_id())
+                .collect();
+            
+            // Delete peers not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM peers WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert/Update new peers
+            for peer in peers {
+                let id = peer.get_id();
+                if existing_ids.contains(&id) {
+                    // Update existing
+                    conn.execute(
+                        "UPDATE peers SET user_id = ?1, addr = ?2, pubkey = ?3, last_heartbeat = ?4 WHERE id = ?5",
+                        params![
+                            peer.get_user_id().map(|u| u.to_string()),
+                            peer.get_addr().to_string(),
+                            peer.get_pubkey().to_bytes(),
+                            peer.get_last_heartbeat(),
+                            id
+                        ],
+                    )?;
+                } else {
+                    // Insert new
+                    conn.execute(
+                        "INSERT INTO peers (id, user_id, addr, pubkey, last_heartbeat) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            id,
+                            peer.get_user_id().map(|u| u.to_string()),
+                            peer.get_addr().to_string(),
+                            peer.get_pubkey().to_bytes(),
+                            peer.get_last_heartbeat()
+                        ],
+                    )?;
+                }
+            }
+            
+            Ok(conn.changes() > 0)
+        }).await?
+    }
+
+    /// Saving all messages to DB
+    pub async fn save_all_messages(&self, messages: Vec<Message>) -> Result<bool> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            
+            // Get existing message IDs
+            let mut stmt = conn.prepare("SELECT id FROM messages")?;
+            let existing_ids: HashSet<i32> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            
+            // Build set of new message IDs
+            let new_ids: HashSet<i32> = messages.iter()
+                .map(|m| m.get_id())
+                .collect();
+            
+            // Delete messages not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM messages WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert/Update new messages
+            for message in messages {
+                let id = message.get_id();
+                if existing_ids.contains(&id) {
+                    // Update existing
+                    conn.execute(
+                        "UPDATE messages SET sender_id = ?1, contents = ?2, sent_at = ?3 WHERE id = ?4",
+                        params![
+                            message.get_sender_id().to_string(),
+                            message.get_contents(),
+                            message.get_sent_at(),
+                            id
+                        ],
+                    )?;
+                } else {
+                    // Insert new
+                    conn.execute(
+                        "INSERT INTO messages (id, sender_id, contents, sent_at) VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            id,
+                            message.get_sender_id().to_string(),
+                            message.get_contents(),
+                            message.get_sent_at()
+                        ],
+                    )?;
+                }
+            }
+            
+            Ok(conn.changes() > 0)
+        }).await?
+    }
 }
