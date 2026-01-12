@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::{Arc, RwLock}};
 use time::OffsetDateTime;
 use crate::{auth::User, connection::Peer, db::Database};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     id: i32,
     sender_id: u64,

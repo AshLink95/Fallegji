@@ -13,7 +13,7 @@ use chacha20poly1305::Key;
 // use serde_json;
 // use time::OffsetDateTime;
 
-use crate::auth::{Authentication, User};
+use crate::{auth::{Authentication, User}, messaging::Message};
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -39,14 +39,34 @@ pub struct Connection {
     rendezvous: (SocketAddr, Option<RouterSocket>)
 }
 
-/// rendez-vous server fallback (where to meet and automatically route) [TODO]
-trait RendezVous { }
-/// initial verification and checking of new peers [TODO]
-trait Verif { }
-/// direct connection, keepalive and reconnect (default mode) [TODO]
-trait Stable { }
-/// Encryption/Decryption and Serialization/Deserialization [TODO]
-trait Communication { }
+/// rendez-vous address meetup and fallback (peer setup and routing)
+pub trait RendezVous {
+    fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>>;
+    fn snd_requests(&self, name:String) -> Result<()>;
+
+    fn request_final_verif(&self) -> Result<()>;
+    fn confirm_final_verif(&self) -> Result<()>;
+
+    fn init_peer(&self) -> Result<()>;
+    fn fallback_lookup(&self) -> Result<()>;
+    fn fallback_send(&self) -> Result<()>;
+}
+/// direct communication, keepalive checking and typing (default mode)
+pub trait Communication {
+    async fn send_msg(&self, msg: Vec<u8>) -> Result<()>;
+    async fn read_msg(&self) -> Result<Vec<u8>>;
+
+    async fn send_heartbeat(&self) -> Result<()>;
+    async fn read_heartbeat(&self) -> Result<bool>;
+
+    async fn send_typing(&self, typing: bool) -> Result<()>;
+    async fn read_typing(&self) -> Result<bool>;
+}
+/// Encryption/Decryption and Serialization/Deserialization
+pub trait Secrecy {
+    fn encode(&self, msg: Message) -> Result<Vec<u8>>;
+    fn decode(&self, cyp: Vec<u8>) -> Result<Message>;
+}
 
 impl Peer {
     /// new created peer
