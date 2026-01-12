@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident) => {
+    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident, $config: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -34,7 +34,7 @@ macro_rules! chat {
                     .collect()
             };
             
-            let line_count = (lines.len() as u16 + 2).min(7); // caps at 5
+            let line_count = (lines.len() as u16 + 2).min($config.max_height + 2);
             
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -73,12 +73,12 @@ macro_rules! chat {
             let input_box = Paragraph::new(display_text)
                 .block(
                     Block::default().borders(Borders::ALL)
-                        .title(format!(" {} ", "Input")) // dbg: Input will be the User name (and color-customizable)
+                        .title(format!(" {} ", $config.user_name.as_ref().unwrap()))
                         .title_bottom(
                             Line::from(format!(" {} ", mode))
                                 .style(Style::default().fg(match $vim_mode {
-                                    Vim::Normal => Color::Rgb(0,212,255),
-                                    Vim::Insert => Color::Rgb(255,102,204),
+                                    Vim::Normal => $config.normal_mode,
+                                    Vim::Insert => $config.insert_mode,
                                 }))
                         )
                         .title_bottom(
@@ -88,12 +88,12 @@ macro_rules! chat {
                                     } else { "".to_string() }
                                 ))
                                     .alignment(Alignment::Right)
-                                    .style(Style::default().fg(Color::White))
+                                    .style(Style::default().fg($config.text_color))
                         )
-                        .border_type(BorderType::Rounded)
-                        .style(Style::default().fg(Color::DarkGray)) // box color
+                        .border_type($config.border_style)
+                        .style(Style::default().fg($config.border_color)) // box color
                 )
-                .style(Style::default().fg(Color::White)); // text color
+                .style(Style::default().fg($config.text_color)); // text color
             
             // Cursor position
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();

@@ -1,11 +1,12 @@
-mod connection; //TODO (2)
+mod connection; //TODO
 mod messaging;  //TODO: dependant on connection
 mod ui_screens; //TODO: dependant on messaging
-mod app;        //TODO: dependant on everything (might build a manager)
+mod app;        //TODO: dependant on everything
 
 mod db;
 mod auth;
 mod vim;
+mod config;
 
 use anyhow::Result;
 

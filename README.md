@@ -20,14 +20,11 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Macros (might be a stretch)
 
 # General checklist
-- [ ] make config.rs which is responsible for config files (contains a struct initialized in main based on the config dotfile and passed to `app()`. Based on what's configured and whether or not there's errors, app will decide to either move to onboarding or skip it). This file is necessary and gets automatically generated as it also contains the wireguard/boringTUN public keys per chat
 - [ ] allow `/` commands in-text. Start with the ability to send files
 
 
 # Onboarding Menu
-This is a screen users are greated with, which prompts them to choose their name, preferred tunnel ip range among other options like vim motions, colorscheme and layout. Note that these configurable settings are saved in `.config/fallegji` or `.fallegji`. yet to decide
-
-Certain configurations can only be set in this config file. Namely, private keys, granular colorschemes and input height. These configurations are per-chat. Users can select which chat to go to, directly, effectively skipping the menu directly when there are no syntax errors.
+Effectively the home screen. this is the menu where users can choose which chat to go with and they have the option to create a chat here.
 
 # Initial Connection
 When a user decides to be a server, they can choose the number of endpoints allowed and they have their endpoint IP (almost always wifi IP) displayed for clients to enter.

@@ -181,7 +181,7 @@ impl Secrecy for Connection {
     }
 }
 
-impl RendezVous for Connection {
+impl RendezVous for Connection { //TODO: deal with the rendezvous field
     async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>> {
         Ok([].to_vec())
     }
@@ -208,7 +208,7 @@ impl RendezVous for Connection {
     }
 }
 
-impl Communication for Connection { //TODO: encode 
+impl Communication for Connection { //TODO: send to all, receive from all
     async fn send_msg(&self, msg: Message) -> Result<()> {
         let _ = msg;
         Ok(())
