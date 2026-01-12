@@ -41,15 +41,15 @@ pub struct Connection {
 
 /// rendez-vous address meetup and fallback (peer setup and routing)
 pub trait RendezVous {
-    fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>>;
-    fn snd_requests(&self, name:String) -> Result<()>;
+    async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>>;
+    async fn snd_requests(&self, name:String) -> Result<()>;
 
-    fn request_final_verif(&self) -> Result<()>;
-    fn confirm_final_verif(&self) -> Result<()>;
+    async fn request_final_verif(&self) -> Result<()>;
+    async fn confirm_final_verif(&self) -> Result<()>;
 
-    fn init_peer(&self) -> Result<()>;
-    fn fallback_lookup(&self) -> Result<()>;
-    fn fallback_send(&self) -> Result<()>;
+    async fn init_peer(&self) -> Result<()>;
+    async fn fallback_lookup(&self) -> Result<()>;
+    async fn fallback_send(&self) -> Result<()>;
 }
 /// direct communication, keepalive checking and typing (default mode)
 pub trait Communication {
