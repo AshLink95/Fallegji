@@ -1,8 +1,9 @@
 // prompt engineered
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
 use nix::unistd::Uid;
-use fallegji::connection::{Peer, KeyGen};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy}, messaging::Message};
 
 #[test]
 fn test_peer_new_out_creation() {
@@ -113,3 +114,56 @@ fn test_keygen() {
     assert_eq!(shared1.as_slice(), shared2.as_slice());
     assert_eq!(shared1.as_slice().len(), 32);
 }
+
+#[test]
+fn test_secrecy_comprehensive() {
+    // Arrange
+    let key_bytes: &[u8; 32] = b"super-secret-32-byte-key!!-12345";
+    let key = Key::from_slice(key_bytes);
+    let wrong_key = Key::from_slice(b"wrong-key-does-not-match-1234567");
+    
+    // Test cases using Message::new() with private fields
+    let test_messages = [
+        Message::new(1, 12345, "Hello peer-to-peer world!".to_string()),
+        Message::new(2, 0, "".to_string()),
+        Message::new(3, 999, "🔥 Complex chars: emojis & unicode 🔥".to_string()),
+    ];
+    
+    // Act & Assert: Roundtrip all messages
+    for original_msg in test_messages.iter() {
+        // Encode
+        let encrypted = Connection::encode(key, original_msg.clone()).expect("Encode failed");
+        
+        // Structure checks using getters
+        assert!(encrypted.len() >= 12 + 16, "Too short: {}", encrypted.len());
+        let plaintext_len = serde_json::to_vec(&original_msg).unwrap().len();
+        assert_eq!(encrypted.len(), plaintext_len + 12 + 16, 
+                  "Size mismatch: expected {} got {}", 
+                  plaintext_len + 12 + 16, encrypted.len());
+        
+        // Decode
+        let decrypted = Connection::decode(key, &encrypted).expect("Decode failed");
+        
+        // Perfect roundtrip using getters
+        assert_eq!(original_msg.get_id(), decrypted.get_id(), "ID mismatch");
+        assert_eq!(original_msg.get_sender_id(), decrypted.get_sender_id(), "Sender mismatch");
+        assert_eq!(original_msg.get_contents(), decrypted.get_contents(), "Contents mismatch");
+        assert_eq!(original_msg.get_sent_at(), decrypted.get_sent_at(), "Timestamp mismatch");
+    }
+    
+    // Security tests: Wrong key (1) and Invalid data (2 & 3) fail
+    let mut msg = Message::new(999, 999, "tamper test".to_string());
+    msg.set_contents("security test".to_string());  // Using setter
+    let encrypted = Connection::encode(key, msg).unwrap();
+    assert!(Connection::decode(wrong_key, &encrypted).is_err(), "Wrong key should fail");
+    assert!(Connection::decode(key, &[]).is_err(), "Empty data should fail");
+    assert!(Connection::decode(key, &encrypted[..11]).is_err(), "Too short should fail");
+}
+
+// 1 for rendezvous requests
+// 1 for rendezvous final verif and init peer
+// 1 for rendezvous fallback and init peer
+//
+// 1 for communication messages,
+// 1 for comm heartbeat
+// 1 for comm typing

@@ -3,10 +3,10 @@ use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
 use sha2::Sha256;
-use zeromq::{DealerSocket, RouterSocket};
+use zeromq::{DealerSocket, RouterSocket, Socket};
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
-use chacha20poly1305::Key;
+use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
 // use tokio::{task, time::{sleep, Duration, interval}};
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
@@ -39,33 +39,35 @@ pub struct Connection {
     rendezvous: (SocketAddr, Option<RouterSocket>)
 }
 
+/// Encryption/Decryption and Serialization/Deserialization
+pub trait Secrecy {
+    fn encode(key: &Key, msg: Message) -> Result<Vec<u8>>;
+    fn decode(key: &Key, cip: &[u8]) -> Result<Message>;
+}
 /// rendez-vous address meetup and fallback (peer setup and routing)
+#[allow(async_fn_in_trait)]
 pub trait RendezVous {
     async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>>;
     async fn snd_requests(&self, name:String) -> Result<()>;
 
     async fn request_final_verif(&self) -> Result<()>;
     async fn confirm_final_verif(&self) -> Result<()>;
-
     async fn init_peer(&self) -> Result<()>;
+
     async fn fallback_lookup(&self) -> Result<()>;
     async fn fallback_send(&self) -> Result<()>;
 }
 /// direct communication, keepalive checking and typing (default mode)
+#[allow(async_fn_in_trait)]
 pub trait Communication {
-    async fn send_msg(&self, msg: Vec<u8>) -> Result<()>;
-    async fn read_msg(&self) -> Result<Vec<u8>>;
+    async fn send_msg(&self, msg: Message) -> Result<()>;
+    async fn read_msg(&self) -> Result<Message>;
 
     async fn send_heartbeat(&self) -> Result<()>;
     async fn read_heartbeat(&self) -> Result<bool>;
 
     async fn send_typing(&self, typing: bool) -> Result<()>;
     async fn read_typing(&self) -> Result<bool>;
-}
-/// Encryption/Decryption and Serialization/Deserialization
-pub trait Secrecy {
-    fn encode(&self, msg: Message) -> Result<Vec<u8>>;
-    fn decode(&self, cyp: Vec<u8>) -> Result<Message>;
 }
 
 impl Peer {
@@ -139,5 +141,94 @@ impl KeyGen for Peer {
         let mut shrdkey_b = [0u8; 32];
         hkdf.expand(b"fallegji", &mut shrdkey_b).unwrap();
         *Key::from_slice(&shrdkey_b)
+    }
+}
+
+impl Connection {
+    fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Self {
+        Self {
+            prvkey,
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            rendezvous: (rendezvous_addr, Some(RouterSocket::new()))
+        }
+    }
+}
+
+impl Secrecy for Connection {
+    fn encode(key: &Key, msg: Message) -> Result<Vec<u8>> {
+        let plaintxt: Vec<u8> = serde_json::to_vec(&msg)?;
+        let cipher = ChaCha20Poly1305::new(key);
+        let mut rng = OsRng;
+        let nonce: Nonce = ChaCha20Poly1305::generate_nonce(&mut rng);
+        let mut ciphertxt = cipher.encrypt(&nonce, plaintxt.as_ref())
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        let mut res = nonce.as_slice().to_vec();
+        res.append(&mut ciphertxt);
+        Ok(res)
+    }
+
+    fn decode(key: &Key, cip: &[u8]) -> Result<Message> {
+        if cip.len() < 12 {
+            return Err(anyhow::anyhow!("Data too short for nonce"));
+        }
+        let nonce = Nonce::from_slice(&cip[..12]);
+        let ciphertext = &cip[12..];
+        let cipher = ChaCha20Poly1305::new(key);
+        let plaintext = cipher.decrypt(nonce, ciphertext)
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+        let msg: Message = serde_json::from_slice(&plaintext)?;
+        Ok(msg)
+    }
+}
+
+impl RendezVous for Connection {
+    async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>> {
+        Ok([].to_vec())
+    }
+    async fn snd_requests(&self, name:String) -> Result<()> {
+        let _ = name;
+        Ok(())
+    }
+
+    async fn request_final_verif(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn confirm_final_verif(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn init_peer(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn fallback_lookup(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn fallback_send(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Communication for Connection { //TODO: encode 
+    async fn send_msg(&self, msg: Message) -> Result<()> {
+        let _ = msg;
+        Ok(())
+    }
+    async fn read_msg(&self) -> Result<Message> {
+        Ok(Message::new(0, 0, "".to_string()))
+    }
+
+    async fn send_heartbeat(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn read_heartbeat(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn send_typing(&self, typing: bool) -> Result<()> {
+        let _ = typing;
+        Ok(())
+    }
+    async fn read_typing(&self) -> Result<bool> {
+        Ok(false)
     }
 }
