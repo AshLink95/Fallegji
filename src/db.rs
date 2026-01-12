@@ -1,5 +1,5 @@
 use std::{collections::HashSet, net::SocketAddr, sync::{Arc, Mutex}};
-use anyhow::{Error, Result, bail};
+use anyhow::{Result, bail};
 use hex::{ToHex, encode};
 use nix::unistd::Uid;
 use rusqlite::{Connection, params};
@@ -437,7 +437,6 @@ impl Database {
             Ok(users)
         }).await?
     }
-
     /// Loading all peers from DB
     pub async fn load_all_peers(&self) -> Result<Vec<Peer>> {
         let conn = Arc::clone(&self.conn);
@@ -498,7 +497,6 @@ impl Database {
             Ok(peers)
         }).await?
     }
-
     /// Loading all messages from DB (ordered by sent_at)
     pub async fn load_all_messages(&self) -> Result<Vec<Message>> {
         let conn = Arc::clone(&self.conn);
@@ -539,7 +537,7 @@ impl Database {
 
     // Saving
     /// Saving all users to DB
-    pub async fn save_all_users(&self, users: Vec<User>) -> Result<bool> {
+    pub async fn save_all_users(&self, users: Vec<User>) -> Result<usize> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -555,33 +553,27 @@ impl Database {
                 .map(|u| u.get_id().to_string())
                 .collect();
             
-            // Delete users not in new set
-            for old_id in existing_ids.difference(&new_ids) {
-                conn.execute("DELETE FROM users WHERE id = ?1", params![old_id])?;
-            }
-            
-            // Insert/Update new users
-            for user in users {
-                // Get pubkey for verification
-                let mut stmt_k = conn.prepare(
-                    "SELECT pubkey FROM peers WHERE user_id = ?1"
-                )?;
-                let key: String = match stmt_k.query_row(params![user.get_id().to_string()], |row| {
-                    let pubkey_bytes: Vec<u8> = row.get(0)?;
-                    Ok(hex::encode(pubkey_bytes))
-                }) {
-                    Ok(k) => k,
-                    Err(rusqlite::Error::QueryReturnedNoRows) => continue, // Skip if no peer found
-                    Err(e) => return Err(e.into()),
-                };
-                
-                // Verify user before insert/update
-                if !user.ver_id(key, user.get_id()) {
-                    continue; // Skip invalid users
-                }
-                
+            // Update existing users first
+            for user in &users {
                 let id_str = user.get_id().to_string();
                 if existing_ids.contains(&id_str) {
+                    // Get pubkey for verification
+                    let mut stmt_k = conn.prepare(
+                        "SELECT pubkey FROM peers WHERE user_id = ?1"
+                    )?;
+                    let key: String = match stmt_k.query_row(params![&id_str], |row| {
+                        let pubkey_bytes: Vec<u8> = row.get(0)?;
+                        Ok(hex::encode(pubkey_bytes))
+                    }) {
+                        Ok(k) => k,
+                        Err(_) => continue, // Skip if no peer found
+                    };
+                    
+                    // Verify user before update
+                    if !user.ver_id(key, user.get_id()) {
+                        continue; // Skip invalid users
+                    }
+                    
                     // Update existing
                     conn.execute(
                         "UPDATE users SET name = ?1, role = ?2, uid = ?3 WHERE id = ?4",
@@ -592,7 +584,35 @@ impl Database {
                             id_str
                         ],
                     )?;
-                } else {
+                }
+            }
+            
+            // Delete users not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM users WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert new users
+            for user in &users {
+                let id_str = user.get_id().to_string();
+                if !existing_ids.contains(&id_str) {
+                    // Get pubkey for verification
+                    let mut stmt_k = conn.prepare(
+                        "SELECT pubkey FROM peers WHERE user_id = ?1"
+                    )?;
+                    let key: String = match stmt_k.query_row(params![&id_str], |row| {
+                        let pubkey_bytes: Vec<u8> = row.get(0)?;
+                        Ok(hex::encode(pubkey_bytes))
+                    }) {
+                        Ok(k) => k,
+                        Err(_) => continue, // Skip if no peer found
+                    };
+                    
+                    // Verify user before insert
+                    if !user.ver_id(key, user.get_id()) {
+                        continue; // Skip invalid users
+                    }
+                    
                     // Insert new
                     conn.execute(
                         "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
@@ -606,12 +626,15 @@ impl Database {
                 }
             }
             
-            Ok(conn.changes() > 0)
+            // Count total users in DB
+            let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM users")?;
+            let count = count_stmt.query_row([], |row| row.get::<_, u32>(0))?;
+            
+            Ok(count as usize)
         }).await?
     }
-
     /// Saving all peers to DB
-    pub async fn save_all_peers(&self, peers: Vec<Peer>) -> Result<bool> {
+    pub async fn save_all_peers(&self, peers: Vec<Peer>) -> Result<usize> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -627,13 +650,8 @@ impl Database {
                 .map(|p| p.get_id())
                 .collect();
             
-            // Delete peers not in new set
-            for old_id in existing_ids.difference(&new_ids) {
-                conn.execute("DELETE FROM peers WHERE id = ?1", params![old_id])?;
-            }
-            
-            // Insert/Update new peers
-            for peer in peers {
+            // Update existing peers first
+            for peer in &peers {
                 let id = peer.get_id();
                 if existing_ids.contains(&id) {
                     // Update existing
@@ -647,7 +665,18 @@ impl Database {
                             id
                         ],
                     )?;
-                } else {
+                }
+            }
+            
+            // Delete peers not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM peers WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert new peers
+            for peer in &peers {
+                let id = peer.get_id();
+                if !existing_ids.contains(&id) {
                     // Insert new
                     conn.execute(
                         "INSERT INTO peers (id, user_id, addr, pubkey, last_heartbeat) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -662,12 +691,15 @@ impl Database {
                 }
             }
             
-            Ok(conn.changes() > 0)
+            // Count total peers in DB
+            let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM peers")?;
+            let count = count_stmt.query_row([], |row| row.get::<_, u32>(0))?;
+            
+            Ok(count as usize)
         }).await?
     }
-
     /// Saving all messages to DB
-    pub async fn save_all_messages(&self, messages: Vec<Message>) -> Result<bool> {
+    pub async fn save_all_messages(&self, messages: Vec<Message>) -> Result<usize> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -683,13 +715,8 @@ impl Database {
                 .map(|m| m.get_id())
                 .collect();
             
-            // Delete messages not in new set
-            for old_id in existing_ids.difference(&new_ids) {
-                conn.execute("DELETE FROM messages WHERE id = ?1", params![old_id])?;
-            }
-            
-            // Insert/Update new messages
-            for message in messages {
+            // Update existing messages first
+            for message in &messages {
                 let id = message.get_id();
                 if existing_ids.contains(&id) {
                     // Update existing
@@ -702,7 +729,18 @@ impl Database {
                             id
                         ],
                     )?;
-                } else {
+                }
+            }
+            
+            // Delete messages not in new set
+            for old_id in existing_ids.difference(&new_ids) {
+                conn.execute("DELETE FROM messages WHERE id = ?1", params![old_id])?;
+            }
+            
+            // Insert new messages
+            for message in &messages {
+                let id = message.get_id();
+                if !existing_ids.contains(&id) {
                     // Insert new
                     conn.execute(
                         "INSERT INTO messages (id, sender_id, contents, sent_at) VALUES (?1, ?2, ?3, ?4)",
@@ -716,7 +754,11 @@ impl Database {
                 }
             }
             
-            Ok(conn.changes() > 0)
+            // Count total messages in DB
+            let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM messages")?;
+            let count = count_stmt.query_row([], |row| row.get::<_, u32>(0))?;
+            
+            Ok(count as usize)
         }).await?
     }
 }

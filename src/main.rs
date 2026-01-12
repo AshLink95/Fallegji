@@ -1,9 +1,9 @@
-mod db;         //TODO (1)
 mod connection; //TODO (2)
 mod messaging;  //TODO: dependant on connection
 mod ui_screens; //TODO: dependant on messaging
 mod app;        //TODO: dependant on everything (might build a manager)
 
+mod db;
 mod auth;
 mod vim;
 
