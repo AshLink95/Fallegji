@@ -15,9 +15,9 @@ macro_rules! onboarding {
                 let vertical_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Percentage(30),
-                        Constraint::Length(12),
-                        Constraint::Percentage(30),
+                        Constraint::Percentage(25),
+                        Constraint::Length(16),
+                        Constraint::Percentage(25),
                     ])
                     .split(size);
                 
@@ -47,12 +47,16 @@ macro_rules! onboarding {
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
                         Constraint::Length(2),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                        Constraint::Length(2),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
                         Constraint::Length(1),
                     ])
                     .split(inner);
@@ -87,7 +91,7 @@ macro_rules! onboarding {
                 let separator = Paragraph::new("─".repeat(center_area.width.saturating_sub(2) as usize))
                     .alignment(Alignment::Center)
                     .style(Style::default().fg($config.border_color).bg($config.bg_color));
-                frame.render_widget(separator, lines_layout[3]);
+                frame.render_widget(&separator, lines_layout[3]);
                 
                 // Line: "create new chat"
                 let create_active = $active_section == 1;
@@ -163,6 +167,60 @@ macro_rules! onboarding {
                 let rendezvous_paragraph = Paragraph::new(rendezvous_line)
                     .style(Style::default().bg($config.bg_color));
                 frame.render_widget(rendezvous_paragraph, lines_layout[7]);
+                
+                // Separator
+                frame.render_widget(&separator, lines_layout[8]);
+                
+                // Line: "join new chat"
+                let join_active = $active_section == 2;
+                let join_style = if join_active {
+                    Style::default().fg($config.text_color)
+                } else {
+                    Style::default().fg($config.border_color)
+                };
+                
+                let join_header = Paragraph::new(
+                    Line::from(vec![
+                        Span::styled("join new chat", join_style)
+                    ])
+                )
+                .alignment(Alignment::Center)
+                .style(Style::default().bg($config.bg_color));
+                frame.render_widget(join_header, lines_layout[9]);
+                
+                // Join user name field
+                let join_user_name_active = join_active && $active_field == 0;
+                let join_user_name_label_color = if join_user_name_active { $config.text_color } else { $config.border_color };
+                
+                let mut join_user_name_spans = vec![
+                    Span::styled("user name: ", Style::default().fg(join_user_name_label_color)),
+                ];
+                if join_user_name_active {
+                    join_user_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
+                }
+                join_user_name_spans.push(Span::styled(&$user_name_input, Style::default().fg(user_name_color)));
+                
+                let join_user_name_line = Line::from(join_user_name_spans);
+                let join_user_name_paragraph = Paragraph::new(join_user_name_line)
+                    .style(Style::default().bg($config.bg_color));
+                frame.render_widget(join_user_name_paragraph, lines_layout[10]);
+                
+                // Join rendezvous address field
+                let join_rendezvous_active = join_active && $active_field == 1;
+                let join_rendezvous_label_color = if join_rendezvous_active { $config.text_color } else { $config.border_color };
+                
+                let mut join_rendezvous_spans = vec![
+                    Span::styled("rendezvous: ", Style::default().fg(join_rendezvous_label_color)),
+                ];
+                if join_rendezvous_active {
+                    join_rendezvous_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
+                }
+                join_rendezvous_spans.push(Span::styled(&$rendezvous_input, Style::default().fg(rendezvous_color)));
+                
+                let join_rendezvous_line = Line::from(join_rendezvous_spans);
+                let join_rendezvous_paragraph = Paragraph::new(join_rendezvous_line)
+                    .style(Style::default().bg($config.bg_color));
+                frame.render_widget(join_rendezvous_paragraph, lines_layout[11]);
             })?;
 
             // Handle input
@@ -176,6 +234,11 @@ macro_rules! onboarding {
                                 $active_field -= 1;
                             } else if $active_section == 1 && $active_field == 0 {
                                 $active_section = 0;
+                            } else if $active_section == 2 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 2 && $active_field == 0 {
+                                $active_section = 1;
+                                $active_field = 2;
                             }
                         }
                         KeyCode::Up => {
@@ -183,6 +246,11 @@ macro_rules! onboarding {
                                 $active_field -= 1;
                             } else if $active_section == 1 && $active_field == 0 {
                                 $active_section = 0;
+                            } else if $active_section == 2 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 2 && $active_field == 0 {
+                                $active_section = 1;
+                                $active_field = 2;
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -191,6 +259,11 @@ macro_rules! onboarding {
                                 $active_field = 0;
                             } else if $active_section == 1 && $active_field < 2 {
                                 $active_field += 1;
+                            } else if $active_section == 1 && $active_field == 2 {
+                                $active_section = 2;
+                                $active_field = 0;
+                            } else if $active_section == 2 && $active_field < 1 {
+                                $active_field += 1;
                             }
                         }
                         KeyCode::Down => {
@@ -198,6 +271,11 @@ macro_rules! onboarding {
                                 $active_section = 1;
                                 $active_field = 0;
                             } else if $active_section == 1 && $active_field < 2 {
+                                $active_field += 1;
+                            } else if $active_section == 1 && $active_field == 2 {
+                                $active_section = 2;
+                                $active_field = 0;
+                            } else if $active_section == 2 && $active_field < 1 {
                                 $active_field += 1;
                             }
                         }
@@ -235,6 +313,21 @@ macro_rules! onboarding {
                                 _ => {}
                             }
                         }
+                        KeyCode::Enter if $active_section == 2 => {
+                            let user_name_valid = !$user_name_input.is_empty();
+                            let rendezvous_valid = !$rendezvous_input.is_empty() && 
+                                $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
+                            
+                            match $active_field {
+                                0 if user_name_valid => $active_field = 1,
+                                1 if rendezvous_valid && user_name_valid => {
+                                    // TODO: Get into InitClient
+                                    // $user_name_input, $rendezvous_input
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
                         KeyCode::Char(c) if $active_section == 1 => {
                             match $active_field {
                                 0 => $chat_name_input.push(c),
@@ -243,11 +336,25 @@ macro_rules! onboarding {
                                 _ => {}
                             }
                         }
+                        KeyCode::Char(c) if $active_section == 2 => {
+                            match $active_field {
+                                0 => $user_name_input.push(c),
+                                1 => $rendezvous_input.push(c),
+                                _ => {}
+                            }
+                        }
                         KeyCode::Backspace if $active_section == 1 => {
                             match $active_field {
                                 0 => { $chat_name_input.pop(); },
                                 1 => { $user_name_input.pop(); },
                                 2 => { $rendezvous_input.pop(); },
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Backspace if $active_section == 2 => {
+                            match $active_field {
+                                0 => { $user_name_input.pop(); },
+                                1 => { $rendezvous_input.pop(); },
                                 _ => {}
                             }
                         }
