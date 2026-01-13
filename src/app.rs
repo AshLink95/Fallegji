@@ -11,13 +11,13 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Alignment},
-    style::Style,
+    style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
-    text::Line,
+    text::{Line, Span},
     Terminal,
 };
 
-use crate::vim::{Vim, input_handling};
+use crate::{config::ChatChoice, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{onboarding, initServer, initClient, chat};
 use crate::config::Config;
@@ -27,10 +27,11 @@ lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap
 lazy_static::lazy_static! {
     static ref RE_CHR: Regex = Regex::new(r"[a-zA-Z]+").unwrap();
 }
-
 pub fn app() -> Result<()> {
-    // Config file (TODO: make mut after messaging & change to `~/.fallgejirc` in prod)
-    let config = Config::load("fallegji.toml", Some("test"))?;
+    // Config file (TODO: change to `~/.fallgejirc` in prod)
+    static CONFIG: &str = "fallegji.toml";
+    let mut chats = ChatChoice::load(CONFIG)?;
+    let mut config = Config::load(CONFIG, None)?;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -39,18 +40,26 @@ pub fn app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // onboarding state
+    let mut active_section = 0; // 0 = hop into, 1 = create chat
+    let mut active_field = 0; // For create chat: 0 = chat name, 1 = user name, 2 = rendezvous
+    let mut chat_name_input = String::new();
+    let mut user_name_input = String::new();
+    let mut rendezvous_input = String::new();
+
+    // regular input box state
     let mut vim_mode = Vim::Normal;
     let mut seq = String::new();
     let mut input = String::new();
     let mut cursor_pos: usize = 0; // cursor position
     let mut persis_y: usize = 0;   // peristant y position
 
-    let curr_screen = Screen::Chat; //dbg: should be mut and init to Onboarding
+    let mut curr_screen = Screen::Onboarding;
 
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Onboarding {
-            onboarding!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen, config);
+            onboarding!(terminal, curr_screen, chats, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
             initServer!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen, config);
         } else if curr_screen == Screen::InitClient {

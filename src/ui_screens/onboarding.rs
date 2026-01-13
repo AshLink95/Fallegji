@@ -1,6 +1,259 @@
+// use ratatui::{
+//     layout::{Alignment, Constraint, Direction, Layout, Rect},
+//     style::{Color, Style},
+//     text::{Line, Span},
+//     widgets::{Block, BorderType, Borders, Paragraph},
+// };
+// use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 #[macro_export]
 macro_rules! onboarding {
-    ($terminal:ident, $vim_mode: ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident, $config: ident) => {
-        //TODO
-    };
+    ($terminal:ident, $curr_screen: ident, $chats: ident, $config: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
+            $terminal.draw(|frame| {
+                let size = frame.area();
+                
+                // Center the box
+                let vertical_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(30),
+                        Constraint::Length(12),
+                        Constraint::Percentage(30),
+                    ])
+                    .split(size);
+                
+                let horizontal_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(20),
+                        Constraint::Percentage(60),
+                        Constraint::Percentage(20),
+                    ])
+                    .split(vertical_chunks[1]);
+                
+                let center_area = horizontal_chunks[1];
+                
+                // Create the box
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type($config.border_style)
+                    .border_style(Style::default().fg($config.border_color))
+                    .style(Style::default().bg($config.bg_color));
+                
+                let inner = block.inner(center_area);
+                frame.render_widget(block, center_area);
+                
+                // Split inner area for lines
+                let lines_layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(2),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(2),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ])
+                    .split(inner);
+                
+                // Line 1: "hop into < chatname >"
+                let current_chat = $chats.current().unwrap_or("None");
+                let hop_active = $active_section == 0;
+                let arrow_color = if hop_active { $config.text_color } else { $config.border_color };
+                let hop_text_color = if hop_active { $config.text_color } else { $config.border_color };
+                
+                let hop_header = Paragraph::new(
+                    Line::from(vec![
+                        Span::styled("hop into old chat", hop_text_color)
+                    ])
+                )
+                .alignment(Alignment::Center)
+                .style(Style::default().bg($config.bg_color));
+                let hop_line = Line::from(vec![
+                    Span::styled("< ", Style::default().fg(arrow_color)),
+                    Span::styled(current_chat, Style::default().fg($config.my_color)),
+                    Span::styled(" >", Style::default().fg(arrow_color)),
+                ]);
+                
+                let hop_paragraph = Paragraph::new(hop_line)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().bg($config.bg_color));
+                
+                frame.render_widget(hop_header, lines_layout[0]);
+                frame.render_widget(hop_paragraph, lines_layout[2]);
+                
+                // Separator
+                let separator = Paragraph::new("─".repeat(center_area.width.saturating_sub(2) as usize))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg($config.border_color).bg($config.bg_color));
+                frame.render_widget(separator, lines_layout[3]);
+                
+                // Line: "create new chat"
+                let create_active = $active_section == 1;
+                let create_style = if create_active {
+                    Style::default().fg($config.text_color)
+                } else {
+                    Style::default().fg($config.border_color)
+                };
+                
+                let create_header = Paragraph::new(
+                    Line::from(vec![
+                        Span::styled("create new chat", create_style)
+                    ])
+                )
+                .alignment(Alignment::Center)
+                .style(Style::default().bg($config.bg_color));
+                frame.render_widget(create_header, lines_layout[4]);
+                
+                // Chat name field
+                let chat_name_valid = !$chat_name_input.is_empty();
+                let chat_name_color = if chat_name_valid { $config.my_color } else { Color::Red };
+                let chat_name_active = create_active && $active_field == 0;
+                let chat_name_label_color = if chat_name_active { $config.text_color } else { $config.border_color };
+                
+                let mut chat_name_spans = vec![
+                    Span::styled("chat name: ", Style::default().fg(chat_name_label_color)),
+                ];
+                if chat_name_active {
+                    chat_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
+                }
+                chat_name_spans.push(Span::styled(&$chat_name_input, Style::default().fg(chat_name_color)));
+                
+                let chat_name_line = Line::from(chat_name_spans);
+                let chat_name_paragraph = Paragraph::new(chat_name_line)
+                    .style(Style::default().bg($config.bg_color));
+                frame.render_widget(chat_name_paragraph, lines_layout[5]);
+                
+                // User name field
+                let user_name_valid = !$user_name_input.is_empty();
+                let user_name_color = if user_name_valid { $config.my_color } else { Color::Red };
+                let user_name_active = create_active && $active_field == 1;
+                let user_name_label_color = if user_name_active { $config.text_color } else { $config.border_color };
+                
+                let mut user_name_spans = vec![
+                    Span::styled("user name: ", Style::default().fg(user_name_label_color)),
+                ];
+                if user_name_active {
+                    user_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
+                }
+                user_name_spans.push(Span::styled(&$user_name_input, Style::default().fg(user_name_color)));
+                
+                let user_name_line = Line::from(user_name_spans);
+                let user_name_paragraph = Paragraph::new(user_name_line)
+                    .style(Style::default().bg($config.bg_color));
+                frame.render_widget(user_name_paragraph, lines_layout[6]);
+                
+                // Rendezvous address field
+                let rendezvous_valid = !$rendezvous_input.is_empty() && 
+                    $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
+                let rendezvous_color = if rendezvous_valid { $config.my_color } else { Color::Red };
+                let rendezvous_active = create_active && $active_field == 2;
+                let rendezvous_label_color = if rendezvous_active { $config.text_color } else { $config.border_color };
+                
+                let mut rendezvous_spans = vec![
+                    Span::styled("rendezvous: ", Style::default().fg(rendezvous_label_color)),
+                ];
+                if rendezvous_active {
+                    rendezvous_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
+                }
+                rendezvous_spans.push(Span::styled(&$rendezvous_input, Style::default().fg(rendezvous_color)));
+                
+                let rendezvous_line = Line::from(rendezvous_spans);
+                let rendezvous_paragraph = Paragraph::new(rendezvous_line)
+                    .style(Style::default().bg($config.bg_color));
+                frame.render_widget(rendezvous_paragraph, lines_layout[7]);
+            })?;
+
+            // Handle input
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+
+                        KeyCode::Up | KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if $active_section == 1 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 1 && $active_field == 0 {
+                                $active_section = 0;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if $active_section == 1 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 1 && $active_field == 0 {
+                                $active_section = 0;
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if $active_section == 0 {
+                                $active_section = 1;
+                                $active_field = 0;
+                            } else if $active_section == 1 && $active_field < 2 {
+                                $active_field += 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            if $active_section == 0 {
+                                $active_section = 1;
+                                $active_field = 0;
+                            } else if $active_section == 1 && $active_field < 2 {
+                                $active_field += 1;
+                            }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') if $active_section == 0 => {
+                            if $chats.choice > 0 {
+                                $chats.choice -= 1;
+                            } else if !$chats.available.is_empty() {
+                                $chats.choice = $chats.available.len() - 1;
+                            }
+                        }
+                        KeyCode::Right | KeyCode::Char('l') if $active_section == 0 => {
+                            if !$chats.available.is_empty() {
+                                $chats.choice = ($chats.choice + 1) % $chats.available.len();
+                            }
+                        }
+                        KeyCode::Enter if $active_section == 0 => {
+                            let chosen = &$chats.available[$chats.choice];
+                            $config = Config::load(CONFIG, Some(chosen))?;
+                            $curr_screen = Screen::Chat;
+                        }
+                        KeyCode::Enter if $active_section == 1 => {
+                            let chat_name_valid = !$chat_name_input.is_empty();
+                            let user_name_valid = !$user_name_input.is_empty();
+                            let rendezvous_valid = !$rendezvous_input.is_empty() && 
+                                $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
+                            
+                            match $active_field {
+                                0 if chat_name_valid => $active_field = 1,
+                                1 if user_name_valid => $active_field = 2,
+                                2 if rendezvous_valid && chat_name_valid && user_name_valid => {
+                                    // TODO: Get into InitServer
+                                    // $chat_name_input, $user_name_input, $rendezvous_input
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Char(c) if $active_section == 1 => {
+                            match $active_field {
+                                0 => $chat_name_input.push(c),
+                                1 => $user_name_input.push(c),
+                                2 => $rendezvous_input.push(c),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Backspace if $active_section == 1 => {
+                            match $active_field {
+                                0 => { $chat_name_input.pop(); },
+                                1 => { $user_name_input.pop(); },
+                                2 => { $rendezvous_input.pop(); },
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 }

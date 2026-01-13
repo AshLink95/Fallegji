@@ -72,6 +72,11 @@ pub struct ChatConfig {
     pub time_color: Option<(u8, u8, u8)>,
 }
 
+pub struct ChatChoice {
+    pub available: Vec<String>,
+    pub choice: usize
+}
+
 pub struct Config {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
@@ -97,6 +102,25 @@ pub struct Config {
 // Default functions for serde
 fn default_border_style() -> String { "Rounded".to_string() }
 fn default_max_height() -> u16 { 5 }
+
+impl ChatChoice {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = fs::read_to_string(path)?;
+        let toml_config: TomlConfig = toml::from_str(&content)?;
+        
+        let mut available: Vec<String> = toml_config.chats.keys().cloned().collect();
+        available.sort(); // Optional: keep alphabetically sorted
+        
+        Ok(Self {
+            available,
+            choice: 0,
+        })
+    }
+    
+    pub fn current(&self) -> Option<&str> {
+        self.available.get(self.choice).map(|s| s.as_str())
+    }
+}
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P, chat_name: Option<&str>) -> Result<Self> {

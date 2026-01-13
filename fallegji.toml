@@ -1,5 +1,9 @@
 # border_style = "Double"
 # text_color = [255, 255, 0]
+# bg_color = [103, 5, 0]
 
-[test]
+["test"]
 user_name = "AshLink"
+
+["test 2"]
+user_name = "LinkAsh"
