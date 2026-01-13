@@ -6,7 +6,7 @@
 // };
 // use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 #[macro_export]
-macro_rules! onboarding {
+macro_rules! home {
     ($terminal:ident, $curr_screen: ident, $chats: ident, $config: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
             $terminal.draw(|frame| {
                 let size = frame.area();

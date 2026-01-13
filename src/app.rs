@@ -19,7 +19,7 @@ use ratatui::{
 
 use crate::{config::ChatChoice, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
-use crate::{onboarding, initServer, initClient, chat};
+use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
 // Seqeuence parsing regex
@@ -40,7 +40,7 @@ pub fn app() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // onboarding state
+    // home state
     let mut active_section = 0; // 0 = hop into, 1 = create chat
     let mut active_field = 0; // For create chat: 0 = chat name, 1 = user name, 2 = rendezvous
     let mut chat_name_input = String::new();
@@ -54,12 +54,12 @@ pub fn app() -> Result<()> {
     let mut cursor_pos: usize = 0; // cursor position
     let mut persis_y: usize = 0;   // peristant y position
 
-    let mut curr_screen = Screen::Onboarding;
+    let mut curr_screen = Screen::Home;
 
     #[allow(unused)] //macros are weird
     loop {
-        if curr_screen == Screen::Onboarding {
-            onboarding!(terminal, curr_screen, chats, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
+        if curr_screen == Screen::Home {
+            home!(terminal, curr_screen, chats, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
             initServer!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen, config);
         } else if curr_screen == Screen::InitClient {

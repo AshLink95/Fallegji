@@ -1,6 +1,6 @@
 #[derive(PartialEq, Eq)]
-pub enum Screen { Onboarding, InitServer, InitClient, Chat }
+pub enum Screen { Home, InitServer, InitClient, Chat }
 
-pub mod onboarding;
+pub mod home;
 pub mod initialization;
 pub mod chat;

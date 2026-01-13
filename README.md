@@ -23,8 +23,10 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] allow `/` commands in-text. Start with the ability to send files
 
 
-# Onboarding Menu
-Effectively the home screen. this is the menu where users can choose which chat to go with and they have the option to create a chat here.
+# Home Menu
+This is the menu where users can choose which chat to go with and they have the option to create a chat here.
+
+Add a splash art
 
 # Initial Connection
 When a user decides to be a server, they can choose the number of endpoints allowed and they have their endpoint IP (almost always wifi IP) displayed for clients to enter.
