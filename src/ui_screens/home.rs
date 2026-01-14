@@ -1,26 +1,67 @@
-// use ratatui::{
-//     layout::{Alignment, Constraint, Direction, Layout, Rect},
-//     style::{Color, Style},
-//     text::{Line, Span},
-//     widgets::{Block, BorderType, Borders, Paragraph},
-// };
-// use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+// partially prompt engineered
+/// Home Screen
+///
+/// import the following in the file using the macro:
+/// `use ratatui::{`
+///     `layout::{Alignment, Constraint, Direction, Layout, Rect},`
+///     `style::{Color, Style},`
+///     `text::{Line, Span},`
+///     `widgets::{Block, BorderType, Borders, Paragraph},`
+/// `};`
+/// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 #[macro_export]
 macro_rules! home {
     ($terminal:ident, $curr_screen: ident, $chats: ident, $config: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
             $terminal.draw(|frame| {
                 let size = frame.area();
-                
-                // Center the box
+
+                // ASCII art
+                let ascii_art = vec![
+                    "                                       ++########++-",
+                    "                                    ##-............-###",
+                    "                                 ##.  ....... ....  . +###",
+                    "                              ##-. ..............  ..     ###",
+                    "                             #  .......... ....  .. ... .   ##",
+                    "                            #...   ...... ... . ...  ......   ##",
+                    "                           #   ..-.........  .-..  ..... ....  ##",
+                    "                           #.    .  .. .   ...      .   .     .  +",
+                    "                           #   ... ......-            .         #",
+                    "                           #      ...  .     .###.....          #",
+                    "                           ##    .- .. .############++  .      ##",
+                    "                            ## ..  . ..     ....         .   ###",
+                    "                             ##     #...+--###+.#+-    .  -  ##",
+                    "                              ## .. #####........#####-  ..  ##",
+                    "                              ##. . ###.............##.   .. ##",
+                    "                              # . ............    . ..    +  .#",
+                    "                              # . ...........    .   ...  -  +#",
+                    "                              #..   ..............     ... .+##",
+                    "                              #... ......  . .  ...... ..  . ##",
+                    "                              #-.  ..   ...        .... ...   #",
+                    "                              ##-  ..         .  .. . . ..    #",
+                    "                                #-# ##                  ..  ..#",
+                    "                                  +.+#+.           .   .     ##",
+                ];
+
+                // Calculate layout with ASCII art
+                let ascii_height = ascii_art.len() as u16;
                 let vertical_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Percentage(25),
-                        Constraint::Length(16),
-                        Constraint::Percentage(25),
+                        Constraint::Length((size.height.saturating_sub(ascii_height + 14)) / 2),
+                        Constraint::Length(ascii_height),
+                        Constraint::Length(14),
+                        Constraint::Min(0),
                     ])
                     .split(size);
-                
+
+                // Render ASCII art
+                let ascii_text: Vec<Line> = ascii_art.iter()
+                    .map(|line| Line::from(Span::styled(*line, Style::default().fg($config.border_color))))
+                    .collect();
+                let ascii_paragraph = Paragraph::new(ascii_text);
+                frame.render_widget(ascii_paragraph, vertical_chunks[1]);
+
+                // Center the box
                 let horizontal_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([
@@ -28,10 +69,10 @@ macro_rules! home {
                         Constraint::Percentage(60),
                         Constraint::Percentage(20),
                     ])
-                    .split(vertical_chunks[1]);
-                
+                    .split(vertical_chunks[2]);
+
                 let center_area = horizontal_chunks[1];
-                
+
                 // Create the box
                 let block = Block::default()
                     .borders(Borders::ALL)
@@ -41,7 +82,7 @@ macro_rules! home {
                 
                 let inner = block.inner(center_area);
                 frame.render_widget(block, center_area);
-                
+
                 // Split inner area for lines
                 let lines_layout = Layout::default()
                     .direction(Direction::Vertical)
@@ -56,11 +97,11 @@ macro_rules! home {
                         Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Length(1),
-                        Constraint::Length(2),
+                        Constraint::Length(1),
                         Constraint::Length(1),
                     ])
                     .split(inner);
-                
+
                 // Line 1: "hop into < chatname >"
                 let current_chat = $chats.current().unwrap_or("None");
                 let hop_active = $active_section == 0;
@@ -92,7 +133,7 @@ macro_rules! home {
                     .alignment(Alignment::Center)
                     .style(Style::default().fg($config.border_color).bg($config.bg_color));
                 frame.render_widget(&separator, lines_layout[3]);
-                
+
                 // Line: "create new chat"
                 let create_active = $active_section == 1;
                 let create_style = if create_active {
@@ -100,7 +141,7 @@ macro_rules! home {
                 } else {
                     Style::default().fg($config.border_color)
                 };
-                
+
                 let create_header = Paragraph::new(
                     Line::from(vec![
                         Span::styled("create new chat", create_style)
@@ -109,7 +150,7 @@ macro_rules! home {
                 .alignment(Alignment::Center)
                 .style(Style::default().bg($config.bg_color));
                 frame.render_widget(create_header, lines_layout[4]);
-                
+
                 // Chat name field
                 let chat_name_valid = !$chat_name_input.is_empty();
                 let chat_name_color = if chat_name_valid { $config.my_color } else { Color::Red };
@@ -123,18 +164,18 @@ macro_rules! home {
                     chat_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
                 }
                 chat_name_spans.push(Span::styled(&$chat_name_input, Style::default().fg(chat_name_color)));
-                
+
                 let chat_name_line = Line::from(chat_name_spans);
                 let chat_name_paragraph = Paragraph::new(chat_name_line)
                     .style(Style::default().bg($config.bg_color));
                 frame.render_widget(chat_name_paragraph, lines_layout[5]);
-                
+
                 // User name field
                 let user_name_valid = !$user_name_input.is_empty();
                 let user_name_color = if user_name_valid { $config.my_color } else { Color::Red };
                 let user_name_active = create_active && $active_field == 1;
                 let user_name_label_color = if user_name_active { $config.text_color } else { $config.border_color };
-                
+
                 let mut user_name_spans = vec![
                     Span::styled("user name: ", Style::default().fg(user_name_label_color)),
                 ];
@@ -142,7 +183,7 @@ macro_rules! home {
                     user_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
                 }
                 user_name_spans.push(Span::styled(&$user_name_input, Style::default().fg(user_name_color)));
-                
+
                 let user_name_line = Line::from(user_name_spans);
                 let user_name_paragraph = Paragraph::new(user_name_line)
                     .style(Style::default().bg($config.bg_color));
@@ -154,7 +195,7 @@ macro_rules! home {
                 let rendezvous_color = if rendezvous_valid { $config.my_color } else { Color::Red };
                 let rendezvous_active = create_active && $active_field == 2;
                 let rendezvous_label_color = if rendezvous_active { $config.text_color } else { $config.border_color };
-                
+
                 let mut rendezvous_spans = vec![
                     Span::styled("rendezvous: ", Style::default().fg(rendezvous_label_color)),
                 ];
@@ -162,15 +203,15 @@ macro_rules! home {
                     rendezvous_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
                 }
                 rendezvous_spans.push(Span::styled(&$rendezvous_input, Style::default().fg(rendezvous_color)));
-                
+
                 let rendezvous_line = Line::from(rendezvous_spans);
                 let rendezvous_paragraph = Paragraph::new(rendezvous_line)
                     .style(Style::default().bg($config.bg_color));
                 frame.render_widget(rendezvous_paragraph, lines_layout[7]);
-                
+
                 // Separator
                 frame.render_widget(&separator, lines_layout[8]);
-                
+
                 // Line: "join new chat"
                 let join_active = $active_section == 2;
                 let join_style = if join_active {
@@ -178,7 +219,7 @@ macro_rules! home {
                 } else {
                     Style::default().fg($config.border_color)
                 };
-                
+
                 let join_header = Paragraph::new(
                     Line::from(vec![
                         Span::styled("join new chat", join_style)
@@ -187,7 +228,7 @@ macro_rules! home {
                 .alignment(Alignment::Center)
                 .style(Style::default().bg($config.bg_color));
                 frame.render_widget(join_header, lines_layout[9]);
-                
+
                 // Join user name field
                 let join_user_name_active = join_active && $active_field == 0;
                 let join_user_name_label_color = if join_user_name_active { $config.text_color } else { $config.border_color };
@@ -199,12 +240,12 @@ macro_rules! home {
                     join_user_name_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
                 }
                 join_user_name_spans.push(Span::styled(&$user_name_input, Style::default().fg(user_name_color)));
-                
+
                 let join_user_name_line = Line::from(join_user_name_spans);
                 let join_user_name_paragraph = Paragraph::new(join_user_name_line)
                     .style(Style::default().bg($config.bg_color));
                 frame.render_widget(join_user_name_paragraph, lines_layout[10]);
-                
+
                 // Join rendezvous address field
                 let join_rendezvous_active = join_active && $active_field == 1;
                 let join_rendezvous_label_color = if join_rendezvous_active { $config.text_color } else { $config.border_color };
@@ -216,7 +257,7 @@ macro_rules! home {
                     join_rendezvous_spans.push(Span::styled("> ", Style::default().fg($config.text_color)));
                 }
                 join_rendezvous_spans.push(Span::styled(&$rendezvous_input, Style::default().fg(rendezvous_color)));
-                
+
                 let join_rendezvous_line = Line::from(join_rendezvous_spans);
                 let join_rendezvous_paragraph = Paragraph::new(join_rendezvous_line)
                     .style(Style::default().bg($config.bg_color));
@@ -301,7 +342,7 @@ macro_rules! home {
                             let user_name_valid = !$user_name_input.is_empty();
                             let rendezvous_valid = !$rendezvous_input.is_empty() && 
                                 $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
-                            
+
                             match $active_field {
                                 0 if chat_name_valid => $active_field = 1,
                                 1 if user_name_valid => $active_field = 2,
@@ -317,7 +358,7 @@ macro_rules! home {
                             let user_name_valid = !$user_name_input.is_empty();
                             let rendezvous_valid = !$rendezvous_input.is_empty() && 
                                 $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
-                            
+
                             match $active_field {
                                 0 if user_name_valid => $active_field = 1,
                                 1 if rendezvous_valid && user_name_valid => {
@@ -362,5 +403,5 @@ macro_rules! home {
                     }
                 }
             }
-        }
+    }
 }

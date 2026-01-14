@@ -1,4 +1,4 @@
-// prompt engineered
+// partially prompt engineered
 use ratatui::{widgets::BorderType, style::Color};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

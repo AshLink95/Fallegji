@@ -1,6 +1,7 @@
 # border_style = "Double"
+# border_color = [255, 0, 0]
 # text_color = [255, 255, 0]
-# bg_color = [103, 5, 0]
+# bg_color = [103, 5, 255]
 
 ["test"]
 user_name = "AshLink"
