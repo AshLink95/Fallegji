@@ -2,6 +2,7 @@
 # border_color = [255, 0, 0]
 # text_color = [255, 255, 0]
 # bg_color = [103, 5, 255]
+# my_color = [255, 60, 100]
 
 ["test"]
 user_name = "AshLink"

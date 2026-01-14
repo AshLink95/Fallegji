@@ -153,7 +153,7 @@ macro_rules! home {
 
                 // Chat name field
                 let chat_name_valid = !$chat_name_input.is_empty();
-                let chat_name_color = if chat_name_valid { $config.my_color } else { Color::Red };
+                let chat_name_color = $config.my_color;
                 let chat_name_active = create_active && $active_field == 0;
                 let chat_name_label_color = if chat_name_active { $config.text_color } else { $config.border_color };
                 
@@ -172,7 +172,7 @@ macro_rules! home {
 
                 // User name field
                 let user_name_valid = !$user_name_input.is_empty();
-                let user_name_color = if user_name_valid { $config.my_color } else { Color::Red };
+                let user_name_color = $config.my_color;
                 let user_name_active = create_active && $active_field == 1;
                 let user_name_label_color = if user_name_active { $config.text_color } else { $config.border_color };
 
@@ -188,11 +188,21 @@ macro_rules! home {
                 let user_name_paragraph = Paragraph::new(user_name_line)
                     .style(Style::default().bg($config.bg_color));
                 frame.render_widget(user_name_paragraph, lines_layout[6]);
-                
+
                 // Rendezvous address field
                 let rendezvous_valid = !$rendezvous_input.is_empty() && 
                     $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
-                let rendezvous_color = if rendezvous_valid { $config.my_color } else { Color::Red };
+                let is_red = match $config.my_color {
+                    Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => true,
+                    _ => false,
+                };
+                let rendezvous_color = if rendezvous_valid { 
+                    $config.my_color 
+                } else if !is_red { 
+                    Color::Red 
+                } else { 
+                    Color::Rgb(255, 100, 0) 
+                };
                 let rendezvous_active = create_active && $active_field == 2;
                 let rendezvous_label_color = if rendezvous_active { $config.text_color } else { $config.border_color };
 
@@ -249,7 +259,7 @@ macro_rules! home {
                 // Join rendezvous address field
                 let join_rendezvous_active = join_active && $active_field == 1;
                 let join_rendezvous_label_color = if join_rendezvous_active { $config.text_color } else { $config.border_color };
-                
+
                 let mut join_rendezvous_spans = vec![
                     Span::styled("rendezvous: ", Style::default().fg(join_rendezvous_label_color)),
                 ];
@@ -270,7 +280,7 @@ macro_rules! home {
                     match key.code {
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
 
-                        KeyCode::Up | KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if $active_section == 1 && $active_field > 0 {
                                 $active_field -= 1;
                             } else if $active_section == 1 && $active_field == 0 {
@@ -294,7 +304,7 @@ macro_rules! home {
                                 $active_field = 2;
                             }
                         }
-                        KeyCode::Down | KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if $active_section == 0 {
                                 $active_section = 1;
                                 $active_field = 0;
