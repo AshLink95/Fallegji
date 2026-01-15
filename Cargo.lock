@@ -475,6 +475,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-test",
+ "tokio-util",
  "toml",
  "x25519-dalek",
  "zeromq",

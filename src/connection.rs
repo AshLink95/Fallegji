@@ -3,7 +3,8 @@ use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
 use sha2::Sha256;
-use zeromq::{DealerSocket, RouterSocket, Socket};
+use tokio_util::sync::CancellationToken;
+use zeromq::{DealerSocket, RouterSocket, Socket, SocketRecv};
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
@@ -47,7 +48,7 @@ pub trait Secrecy {
 /// rendez-vous address meetup and fallback (peer setup and routing)
 #[allow(async_fn_in_trait)]
 pub trait RendezVous {
-    async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>>;
+    async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()>;
     async fn snd_requests(&self, name:String) -> Result<()>;
 
     async fn request_final_verif(&self) -> Result<()>;
@@ -145,13 +146,33 @@ impl KeyGen for Peer {
 }
 
 impl Connection {
-    fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Self {
+    pub fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Self {
         Self {
             prvkey,
             peers: Arc::new(Mutex::new(HashMap::new())),
             rendezvous: (rendezvous_addr, Some(RouterSocket::new()))
         }
     }
+
+    pub async fn bind_rendezvous(&mut self) -> Result<()> {
+        if self.rendezvous.1.is_none() { self.rendezvous.1 = Some(RouterSocket::new()) };
+        if let Some(rs) = &mut self.rendezvous.1 {
+            rs.bind(&format!("tcp://{}", &self.rendezvous.0)).await?;
+        };
+
+        Ok(())
+    }
+
+    pub async fn connect_rendezvous(&mut self) -> Result<()> {
+        if self.rendezvous.1.is_none() { self.rendezvous.1 = Some(RouterSocket::new()) };
+        if let Some(rs) = &mut self.rendezvous.1 {
+            rs.connect(&format!("tcp://{}", &self.rendezvous.0)).await?;
+        };
+
+        Ok(())
+    }
+
+    pub fn end_rendezvous(&mut self) { self.rendezvous.1 = None; }
 }
 
 impl Secrecy for Connection {
@@ -182,8 +203,37 @@ impl Secrecy for Connection {
 }
 
 impl RendezVous for Connection { //TODO: deal with the rendezvous field
-    async fn rcv_requests(&self) -> Result<Vec<(SocketAddr, String)>> {
-        Ok([].to_vec())
+    async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()> {
+        self.bind_rendezvous().await?;
+        while let Some(socket) = &mut self.rendezvous.1 { tokio::select! {
+            _ = token.cancelled() => { break; }
+            res = socket.recv() => {
+                match res {
+                    Ok(msg) => {
+                        let payload: String = msg.try_into()
+                            .map_err(|e| anyhow::anyhow!("message parsing error: {}", e))?;
+
+                        let start = payload.find('[').context("Missing '['")?;
+                        let end = payload.find(']').context("Missing ']'")?;
+                        if start >= end { continue; }
+                        let name = &payload[..start];
+                        let addr_str = &payload[start+1..end];
+                        let fallegji = &payload[end+1..];
+                        if fallegji != "fallegji" { continue; }
+                        let addr: SocketAddr = addr_str.parse()
+                            .context("Invalid address format")?;
+
+                        requests.push((addr, String::from(name)));
+                    }
+                    Err(zeromq::ZmqError::NoMessage) => {
+                        // No message - yield control briefly
+                        tokio::task::yield_now().await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        } }
+        Ok(())
     }
     async fn snd_requests(&self, name:String) -> Result<()> {
         let _ = name;
@@ -201,6 +251,7 @@ impl RendezVous for Connection { //TODO: deal with the rendezvous field
     }
 
     async fn fallback_lookup(&self) -> Result<()> {
+        //once a user stops receiving heart beats from someone, they will (if not admin, wait a couple ms and then) try to bind to the router socket. If someone is already binded, it will simply connect.
         Ok(())
     }
     async fn fallback_send(&self) -> Result<()> {
