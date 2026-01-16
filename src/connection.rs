@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::{self, SocketAddr}, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use nix::unistd::Uid;
@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
-use tokio::{task, time::{sleep, Duration, interval}, net::UdpSocket};
+use tokio::{task, time::{sleep, Duration, interval}, net::{TcpStream, TcpListener}};
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
 // use serde_json;
@@ -31,13 +31,14 @@ pub trait KeyGen {
 }
 
 /// user_id -> peer, key, socket
-type Peermap = HashMap<u64, (Peer, Key, UdpSocket)>;
+type Peermap = HashMap<u64, (Peer, Key, TcpStream)>;
+enum RendezVousSocket { Listner(TcpListener), Streamer(TcpStream) }
 
-pub struct Connection {
+pub struct Connection { //TODO: will switch to TCP
     prvkey: StaticSecret,
-    socket: (SocketAddr, UdpSocket),
+    socket: (SocketAddr, TcpListener),
     peers: Arc<Mutex<Peermap>>,
-    rendezvous: (SocketAddr, Option<UdpSocket>)
+    rendezvous: (SocketAddr, Option<RendezVousSocket>)
 }
 
 /// Encryption/Decryption and Serialization/Deserialization
@@ -75,7 +76,7 @@ impl Peer {
     /// new created peer
     pub fn new_out(id: i32, port: u16) -> Result<(Self, StaticSecret)> {
         // using UDP trick to get appropriate local IP peers can use
-        let tmpsock = net::UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
         tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
         let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
         let addr = SocketAddr::new(ip, port);
@@ -147,7 +148,7 @@ impl KeyGen for Peer {
 
 impl Connection {
     pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Result<Self> {
-        let tmpsock = net::UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
         tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
         let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
 
@@ -157,9 +158,9 @@ impl Connection {
         for _ in 0..max {
             let addr = SocketAddr::new(ip, port);
             
-            match UdpSocket::bind(addr).await {
-                Ok(rs) => {
-                    let socket = (addr, rs);
+            match TcpListener::bind(addr).await {
+                Ok(tl) => {
+                    let socket = (addr, tl);
                     return Ok(Self {
                         prvkey,
                         socket,
@@ -184,21 +185,21 @@ impl Connection {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
             let curr_ip = self.socket.0.ip();
-            let tmpsock = net::UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+            let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
             tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
             let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
 
             if ip != curr_ip {
                 let addr = SocketAddr::new(ip, 1952);
                 self.socket.0 = addr;
-                self.socket.1 = UdpSocket::bind(&addr).await?;
+                self.socket.1 = TcpListener::bind(&addr).await?;
             }
         }
     }
 
     pub async fn bind_rendezvous(&mut self) -> Result<()> {
         if self.rendezvous.1.is_none() {
-            self.rendezvous.1 = Some(UdpSocket::bind(&self.rendezvous.0).await?)
+            self.rendezvous.1 = Some(RendezVousSocket::Listner(TcpListener::bind(&self.rendezvous.0).await?))
         };
 
         Ok(())
@@ -206,10 +207,7 @@ impl Connection {
 
     pub async fn connect_rendezvous(&mut self) -> Result<()> {
         if self.rendezvous.1.is_none() {
-            let tmpaddr = "127.0.0.0:0".parse::<SocketAddr>()?;
-            let sock = UdpSocket::bind(tmpaddr).await?;
-            sock.connect(&self.rendezvous.0).await?;
-            self.rendezvous.1 = Some(sock);
+            self.rendezvous.1 = Some(RendezVousSocket::Streamer(TcpStream::connect(&self.rendezvous.0).await?))
         };
 
         Ok(())
