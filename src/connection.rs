@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
-use tokio::{task, time::{sleep, Duration, interval}, net::{TcpStream, TcpListener}};
+use tokio::{task, time::{sleep, Duration, interval}, net::{TcpStream, TcpListener}, io::{AsyncReadExt, AsyncWriteExt}};
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
 // use serde_json;
@@ -34,7 +34,7 @@ pub trait KeyGen {
 type Peermap = HashMap<u64, (Peer, Key, TcpStream)>;
 enum RendezVousSocket { Listner(TcpListener), Streamer(TcpStream) }
 
-pub struct Connection { //TODO: will switch to TCP
+pub struct Connection {
     prvkey: StaticSecret,
     socket: (SocketAddr, TcpListener),
     peers: Arc<Mutex<Peermap>>,
@@ -52,7 +52,7 @@ pub trait RendezVous {
     async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()>;
     async fn snd_requests(&mut self, name:String) -> Result<bool>;
 
-    async fn request_final_verif(&self) -> Result<()>;
+    async fn request_final_verif(&self, idx: usize) -> Result<()>;
     async fn confirm_final_verif(&self) -> Result<()>;
     async fn init_peer(&self) -> Result<()>;
 
@@ -243,109 +243,133 @@ impl Secrecy for Connection {
     }
 }
 
-// impl RendezVous for Connection { //TODO: deal with the rendezvous field
-//     async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()> {
-//         self.bind_rendezvous().await?;
-//         while let Some(RendezVousSocket::Dealer(socket)) = &mut self.rendezvous.1 { tokio::select! {
-//             _ = token.cancelled() => { break; }
-//             res = socket.recv() => {
-//                 match res {
-//                     Ok(msg) => {
-//                         let payload: String = msg.try_into()
-//                             .map_err(|e| anyhow::anyhow!("message parsing error: {}", e))?;
-//
-//                         let start = payload.find('[').context("Missing '['")?;
-//                         let end = payload.find(']').context("Missing ']'")?;
-//                         if start >= end { continue; }
-//                         let name = &payload[..start];
-//                         let addr_str = &payload[start+1..end];
-//                         let fallegji = &payload[end+1..];
-//                         if fallegji != "fallegji" { continue; }
-//                         let addr: SocketAddr = addr_str.parse()
-//                             .context("Invalid address format")?;
-//
-//                         requests.push((addr, String::from(name)));
-//                         let send_reply = socket.send(format!("received[({}, {})]fallegji", addr_str, name).into());
-//                         drop(send_reply);
-//                     }
-//                     Err(zeromq::ZmqError::NoMessage) => {
-//                         // No message - yield control briefly
-//                         tokio::task::yield_now().await;
-//                     }
-//                     Err(e) => return Err(e.into()),
-//                 }
-//             }
-//         } }
-//         Ok(())
-//     }
-//     async fn snd_requests(&mut self, name:String) -> Result<bool> {
-//         if self.rendezvous.1.is_none() { self.rendezvous.1 = Some(RendezVousSocket::Dealer(DealerSocket::new())) };
-//
-//         if let Some(RendezVousSocket::Dealer(socket)) = &mut self.rendezvous.1 {
-//             socket.connect(&format!("tcp://{}", &self.rendezvous.0)).await?;
-//             socket.send(format!("{}[{}]fallegji", name, self.socket.0).into()).await?;
-//             let timeout = tokio::time::Duration::from_secs(5);
-//             let start_time = tokio::time::Instant::now();
-//             loop {
-//                 if start_time.elapsed() > timeout {
-//                     return Ok(false); // Timeout
-//                 }
-//                 match tokio::time::timeout(
-//                     tokio::time::Duration::from_millis(500),
-//                     socket.recv()
-//                 ).await {
-//                     Ok(Ok(resp)) => {
-//                         let repl: String = resp.try_into()
-//                             .map_err(|e| anyhow::anyhow!("message parsing error: {}", e))?;
-//                         let start = repl.find('[').context("Missing '['")?;
-//                         let end = repl.find(']').context("Missing ']'")?;
-//                         if start >= end { continue; }
-//                         let prefix = &repl[..start];
-//                         let tuple_content = &repl[start+1..end];
-//                         let suffix = &repl[end+1..];
-//                         if prefix != "received" || suffix != "fallegji" { continue; }
-//                         if !tuple_content.starts_with('(') || !tuple_content.ends_with(')') { continue; }
-//                         let inner = &tuple_content[1..tuple_content.len()-1];
-//                         let parts: Vec<&str> = inner.splitn(2, ", ").collect();
-//                         if parts.len() != 2 { continue; }
-//                         let received_addr = parts[0];
-//                         let received_name = parts[1];
-//                         if received_addr == self.socket.0.to_string() && received_name == name { return Ok(true); }
-//                         continue;
-//                     }
-//                     Ok(Err(zeromq::ZmqError::NoMessage)) => {
-//                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-//                         continue;
-//                     }
-//                     Ok(Err(e)) => return Err(e.into()),
-//                     Err(_) => {
-//                         continue;
-//                     }
-//                 }
-//             }
-//         }
-//         Ok(false)
-//     }
-//
-//     async fn request_final_verif(&self) -> Result<()> {
-//         Ok(())
-//     }
-//     async fn confirm_final_verif(&self) -> Result<()> {
-//         Ok(())
-//     }
-//     async fn init_peer(&self) -> Result<()> {
-//         //when we initialize a peer, we tell him about preexisting peers and update the peermap of all other peers by sending his peer info to everyone in a special packet
-//         Ok(())
-//     }
-//
-//     async fn fallback_lookup(&self) -> Result<()> {
-//         //once a user stops receiving heart beats from someone, they will (if not admin, wait a couple ms and then) try to bind to the router socket. If someone is already binded, it will simply connect.
-//         Ok(())
-//     }
-//     async fn fallback_send(&self) -> Result<()> {
-//         Ok(())
-//     }
-// }
+impl RendezVous for Connection {
+    async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()> {
+        self.bind_rendezvous().await?;
+
+        if let Some(RendezVousSocket::Listner(listener)) = &self.rendezvous.1 {
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => { break; }
+                    result = listener.accept() => {
+                        match result {
+                            Ok((mut stream, _peer_addr)) => {
+                                let mut buffer = vec![0u8; 4096];
+                                match stream.read(&mut buffer).await {
+                                    Ok(n) if n > 0 => {
+                                        let payload = String::from_utf8_lossy(&buffer[..n]);
+                                        let start = match payload.find('[') {
+                                            Some(s) => s,
+                                            None => continue,
+                                        };
+                                        let end = match payload.find(']') {
+                                            Some(e) => e,
+                                            None => continue,
+                                        };
+                                        if start >= end { continue; }
+                                        let name = &payload[..start];
+                                        let addr_str = &payload[start+1..end];
+                                        let fallegji = &payload[end+1..];
+                                        if fallegji.trim() != "fallegji" { continue; }
+                                        let addr: SocketAddr = match addr_str.parse() {
+                                            Ok(a) => a,
+                                            Err(_) => continue,
+                                        };
+                                        requests.push((addr, String::from(name)));
+                                        let reply = format!("received[({}, {})]fallegji", addr_str, name);
+                                        let _ = stream.write_all(reply.as_bytes()).await;
+                                    }
+                                    _ => continue,
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    async fn snd_requests(&mut self, name: String) -> Result<bool> {
+        self.connect_rendezvous().await?;
+        
+        if let Some(RendezVousSocket::Streamer(stream)) = &mut self.rendezvous.1 {
+            let request = format!("{}[{}]fallegji", name, self.socket.0);
+            stream.write_all(request.as_bytes()).await?;
+            let timeout = tokio::time::Duration::from_secs(5);
+            let start_time = tokio::time::Instant::now();
+            let mut buffer = vec![0u8; 4096];
+            loop {
+                if start_time.elapsed() > timeout { return Ok(false); }
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    stream.read(&mut buffer)
+                ).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        let repl = String::from_utf8_lossy(&buffer[..n]);
+                        let start = match repl.find('[') {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let end = match repl.find(']') {
+                            Some(e) => e,
+                            None => continue,
+                        };
+                        if start >= end { continue; }
+                        let prefix = &repl[..start];
+                        let tuple_content = &repl[start+1..end];
+                        let suffix = &repl[end+1..];
+                        if prefix != "received" || suffix.trim() != "fallegji" { 
+                            continue; 
+                        }
+                        if !tuple_content.starts_with('(') || !tuple_content.ends_with(')') { 
+                            continue; 
+                        }
+                        let inner = &tuple_content[1..tuple_content.len()-1];
+                        let parts: Vec<&str> = inner.splitn(2, ", ").collect();
+                        if parts.len() != 2 { continue; }
+                        let received_addr = parts[0];
+                        let received_name = parts[1];
+                        if received_addr == self.socket.0.to_string() && received_name == name {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    Ok(Ok(_)) => {
+                        return Ok(false);
+                    }
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        Ok(false)
+    }
+
+    async fn request_final_verif(&self, idx: usize) -> Result<()> {
+        Ok(())
+    }
+    async fn confirm_final_verif(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn init_peer(&self) -> Result<()> {
+        //when we initialize a peer, we tell him about preexisting peers and update the peermap of all other peers by sending his peer info to everyone in a special packet
+        Ok(())
+    }
+
+    async fn fallback_lookup(&self) -> Result<()> {
+        //once a user stops receiving heart beats from someone, they will (if not admin, wait a couple ms and then) try to bind to the router socket. If someone is already binded, it will simply connect.
+        Ok(())
+    }
+    async fn fallback_send(&self) -> Result<()> {
+        Ok(())
+    }
+}
 
 impl Communication for Connection { //TODO: send to all, receive from all
     async fn send_msg(&self, msg: Message) -> Result<()> {
