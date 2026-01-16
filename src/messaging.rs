@@ -1,5 +1,4 @@
 use std::{collections::HashMap, sync::{Arc, RwLock}};
-// use zeromq;
 // use tokio::task;
 use time::OffsetDateTime;
 use crate::{auth::User, connection::Peer, db::Database};
