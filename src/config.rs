@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::net::SocketAddr;
 use x25519_dalek::{PublicKey, StaticSecret};
 use anyhow::Result;
 
@@ -56,6 +57,7 @@ pub struct ChatConfig {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
     pub peer_id: Option<i32>,
+    pub rendezvous: Option<SocketAddr>,
     
     // Optional overrides for cosmetic configs
     pub border_style: Option<String>,
@@ -81,6 +83,7 @@ pub struct Config {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
     pub peer_id: Option<i32>,
+    pub rendezvous: Option<SocketAddr>,
     pub pubkey: Option<PublicKey>,
     pub prvkey: Option<StaticSecret>,
 
@@ -145,6 +148,7 @@ impl Config {
             user_id: None,
             user_name: Some(String::from("Me")),
             peer_id: None,
+            rendezvous: None,
             pubkey: None,
             prvkey: None,
             border_style: BorderType::Rounded,
@@ -189,6 +193,7 @@ impl Config {
             user_id: chat_config.and_then(|c| c.user_id),
             user_name: chat_config.and_then(|c| c.user_name.clone()),
             peer_id: chat_config.and_then(|c| c.peer_id),
+            rendezvous: chat_config.and_then(|c| c.rendezvous),
             pubkey: None, // These need separate handling/loading
             prvkey: None,
             
@@ -248,7 +253,7 @@ impl Config {
         }
     }
     
-    pub fn save<P: AsRef<Path>>(&self, path: P, chat_name: Option<&str>) -> Result<()> {
+    pub fn save<P: AsRef<Path>>(path: P, chat_name: &str, user_name: &str, rendezvous: &str, user_id: u64, peer_id: i32, pubkey: PublicKey, prvkey: StaticSecret) -> Result<Self> {
         // Load existing config or create new
         let mut toml_config = if path.as_ref().exists() {
             let content = fs::read_to_string(&path)?;
@@ -284,33 +289,56 @@ impl Config {
                 chats: HashMap::new(),
             }
         };
-        
-        if let Some(chat) = chat_name {
-            // Update chat-specific config
-            let chat_config = ChatConfig {
-                user_id: self.user_id,
-                user_name: self.user_name.clone(),
-                peer_id: self.peer_id,
-                border_style: None, // Don't save cosmetic overrides by default
-                max_height: None,
-                bg_color: None,
-                text_color: None,
-                border_color: None,
-                normal_mode: None,
-                insert_mode: None,
-                users_color: None,
-                my_color: None,
-                system_color: None,
-                online_color: None,
-                time_color: None,
-            };
-            toml_config.chats.insert(chat.to_string(), chat_config);
+
+        // Check if chat already exists
+        if toml_config.chats.contains_key(chat_name) {
+            return Err(anyhow::anyhow!("Chat '{}' already exists", chat_name));
         }
-        
+
+        // Update chat-specific config
+        let chat_config = ChatConfig {
+            user_id: Some(user_id),
+            user_name: Some(String::from(user_name)),
+            peer_id: Some(peer_id),
+            rendezvous: Some(rendezvous.parse::<SocketAddr>()?),
+            border_style: None, // Don't save cosmetic overrides by default
+            max_height: None,
+            bg_color: None,
+            text_color: None,
+            border_color: None,
+            normal_mode: None,
+            insert_mode: None,
+            users_color: None,
+            my_color: None,
+            system_color: None,
+            online_color: None,
+            time_color: None,
+        };
+        toml_config.chats.insert(chat_name.to_string(), chat_config);
+
         let toml_string = toml::to_string_pretty(&toml_config)?;
         fs::write(path, toml_string)?;
-        
-        Ok(())
+
+        Ok(Self {
+            user_id: Some(user_id),
+            user_name: Some(String::from(user_name)),
+            peer_id: Some(peer_id),
+            rendezvous: Some(rendezvous.parse::<SocketAddr>()?),
+            pubkey: Some(pubkey),
+            prvkey: Some(prvkey),
+            border_style: parse_border_style(&toml_config.border_style),
+            max_height: toml_config.max_height,
+            bg_color: toml_config.bg_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Reset),
+            text_color: toml_config.text_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::White),
+            border_color: toml_config.border_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
+            normal_mode: toml_config.normal_mode.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Rgb(0, 212, 255)),
+            insert_mode: toml_config.insert_mode.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Rgb(255, 102, 204)),
+            users_color: toml_config.users_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Cyan),
+            my_color: toml_config.my_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Green),
+            system_color: toml_config.system_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
+            online_color: toml_config.online_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Green),
+            time_color: toml_config.time_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
+        })
     }
 }
 

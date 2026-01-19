@@ -22,6 +22,9 @@ use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
+use x25519_dalek::{PublicKey, StaticSecret};
+use chacha20poly1305::aead::OsRng; //dbg
+
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }
 lazy_static::lazy_static! {
@@ -63,13 +66,13 @@ pub fn app() -> Result<()> {
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, chats, choice, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
+            home!(terminal, curr_screen, config, choice, chats, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
-            initServer!(terminal, config, requests, choice);
+            initServer!(terminal, curr_screen, config, choice, chats, requests);
         } else if curr_screen == Screen::InitClient {
-            initClient!(terminal, config);
+            initClient!(terminal, curr_screen, config);
         } else if curr_screen == Screen::Chat {
-            chat!(terminal, vim_mode, seq, input, cursor_pos, persis_y, curr_screen, config, choice);
+            chat!(terminal, curr_screen, config, choice, chats, vim_mode, seq, input, cursor_pos, persis_y);
         }
     }
 

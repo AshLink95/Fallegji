@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $chats: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -28,7 +28,11 @@ macro_rules! input_handling {
                 match key.code {
                     // Universal
                     KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        $chats = ChatChoice::load(CONFIG)?;
                         $curr_screen = Screen::Home;
+                    },
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => { //NOTE: Specific to this app [TODO: exclusive to admins, requires checking members hashmap in Chat stuct] (dbg)
+                        $curr_screen = Screen::InitServer;
                     },
                     KeyCode::Left => {
                         $cursor_pos = $cursor_pos.saturating_sub(1);

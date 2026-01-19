@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident, $config: ident, $choice: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -118,6 +118,6 @@ macro_rules! chat {
         })?;
 
         // Handle input keys
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats);
     };
 }
