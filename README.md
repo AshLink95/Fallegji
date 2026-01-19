@@ -16,11 +16,12 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] replace and replace mode
 - [ ] Visual mode
 - [ ] undo/redo
-- [ ] scrolling (requires flexible scrolling in `chat!`)
+- [ ] Implement searching with `/` and `?`
+- [ ] input scrolling (more natural)
 - [ ] Macros (might be a stretch)
 
 # General checklist
-- [ ] allow `/` commands in-text. Start with the ability to send files
+- [ ] allow `\` commands in-text. Start with the ability to send files
 
 
 # Home Menu

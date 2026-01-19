@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -27,7 +27,9 @@ macro_rules! input_handling {
             if let Event::Key(key) = event {
                 match key.code {
                     // Universal
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        $curr_screen = Screen::Home;
+                    },
                     KeyCode::Left => {
                         $cursor_pos = $cursor_pos.saturating_sub(1);
                         $persis_y = 0;

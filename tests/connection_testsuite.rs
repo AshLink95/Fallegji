@@ -3,8 +3,7 @@ use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
 use tokio::sync::Mutex;
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use nix::unistd::Uid;
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous}, messaging::Message};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous}, messaging::Message, auth::Uid};
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
 use anyhow::Result;
@@ -243,7 +242,6 @@ async fn test_rendezvous_requests() -> Result<()> {
     Ok(())
 }
 
-// 1 for rendezvous final verif and init peer
 // 1 for rendezvous fallback and init peer
 //
 // 1 for communication messages,

@@ -1,7 +1,6 @@
 // prompt engineered
-use fallegji::auth::{User, Role, Authentication};
+use fallegji::auth::{User, Role, Authentication, Uid};
 use anyhow::Result;
-use nix::unistd::Uid;
 
 #[test]
 fn test_role_parsing_and_display() -> Result<()> {
@@ -23,7 +22,7 @@ fn test_role_parsing_and_display() -> Result<()> {
 fn test_authentication_deterministic_and_verifiable() {
     let key = "test_pubkey_123";
     let name = "alice";
-    let uid = Uid::from_raw(1000);
+    let uid = Uid::from(1000);
     
     // Deterministic: same inputs → same ID
     let id1 = User::gen_id(key.to_string(), name, uid);
@@ -46,7 +45,7 @@ fn test_authentication_deterministic_and_verifiable() {
 fn test_user_new_creates_valid_user() {
     let key = "pubkey_xyz";
     let name = "charlie";
-    let uid = Uid::from_raw(500);
+    let uid = Uid::from(500);
     
     let user = User::new(key.to_string(), name.to_string(), uid);
     
@@ -59,17 +58,17 @@ fn test_user_new_creates_valid_user() {
 
 #[test]
 fn test_user_getters() {
-    let user = User::new("key".to_string(), "dave".to_string(), Uid::from_raw(100));
+    let user = User::new("key".to_string(), "dave".to_string(), Uid::from(100));
     
     assert_eq!(user.get_name(), "dave");
-    assert_eq!(user.get_uid(), Uid::from_raw(100));
+    assert_eq!(user.get_uid(), Uid::from(100));
     assert_eq!(user.get_role(), None);
     assert!(user.get_id() > 0);
 }
 
 #[test]
 fn test_user_setters() {
-    let mut user = User::new("key".to_string(), "eve".to_string(), Uid::from_raw(200));
+    let mut user = User::new("key".to_string(), "eve".to_string(), Uid::from(200));
     let original_id = user.get_id();
     
     // Set role

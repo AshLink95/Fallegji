@@ -1,5 +1,5 @@
 //TODO: allow customization of border styles, max height, and colors using a toml-style dotfile. Parameters will be set in constants decided by the dotfile.
-use std::io::{self, Write};
+use std::{io::{self, Write}};//, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
@@ -32,6 +32,7 @@ pub fn app() -> Result<()> {
     static CONFIG: &str = "fallegji.toml";
     let mut chats = ChatChoice::load(CONFIG)?;
     let mut config = Config::load(CONFIG, None)?;
+    let mut choice = String::from("");
 
     // Setup terminal
     enable_raw_mode()?;
@@ -47,6 +48,9 @@ pub fn app() -> Result<()> {
     let mut user_name_input = String::new();
     let mut rendezvous_input = String::new();
 
+    // Admin rendezvous state
+    // let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
+
     // regular input box state
     let mut vim_mode = Vim::Normal;
     let mut seq = String::new();
@@ -59,13 +63,13 @@ pub fn app() -> Result<()> {
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, chats, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
+            home!(terminal, curr_screen, chats, choice, config, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
-            initServer!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen, config);
+            initServer!(terminal, config, requests, choice);
         } else if curr_screen == Screen::InitClient {
-            initClient!(terminal, vim_mode, input, cursor_pos, persis_y, curr_screen, config);
+            initClient!(terminal, config);
         } else if curr_screen == Screen::Chat {
-            chat!(terminal, vim_mode, seq, input, cursor_pos, persis_y, curr_screen, config);
+            chat!(terminal, vim_mode, seq, input, cursor_pos, persis_y, curr_screen, config, choice);
         }
     }
 

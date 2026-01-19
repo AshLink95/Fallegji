@@ -1,12 +1,11 @@
 use std::{collections::HashSet, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::{Result, bail};
 use hex::{ToHex, encode};
-use nix::unistd::Uid;
 use rusqlite::{Connection, params};
 use tokio::task;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::{auth::{Authentication, Role, User}, connection::Peer, messaging::Message};
+use crate::{auth::{Uid, Authentication, Role, User}, connection::Peer, messaging::Message};
 
 pub struct Database {
     conn: Arc<Mutex<Connection>>,

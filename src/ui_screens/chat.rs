@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident, $config: ident) => {
+    ($terminal:ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $curr_screen: ident, $config: ident, $choice: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -39,6 +39,7 @@ macro_rules! chat {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Length(1),
                     Constraint::Min(1),
                     Constraint::Length(line_count),
                 ])
@@ -64,12 +65,10 @@ macro_rules! chat {
                 scroll_offset = cursor_line.saturating_sub(visible_height - 1);
             }
             scroll_offset = scroll_offset.min(lines.len().saturating_sub(visible_height));
-            
-            // Join lines with newlines
-            // let display_text = lines.join("\n");
+
+            // Text & Box
             let visible_lines = &lines[scroll_offset..(scroll_offset + visible_height).min(lines.len())];
             let display_text = visible_lines.join("\n");
-            
             let input_box = Paragraph::new(display_text)
                 .block(
                     Block::default().borders(Borders::ALL)
@@ -79,7 +78,7 @@ macro_rules! chat {
                                 .style(Style::default().fg(match $vim_mode {
                                     Vim::Normal => $config.normal_mode,
                                     Vim::Insert => $config.insert_mode,
-                                }))
+                                }).bg($config.bg_color))
                         )
                         .title_bottom(
                                 Line::from(format!("{}",
@@ -88,13 +87,13 @@ macro_rules! chat {
                                     } else { "".to_string() }
                                 ))
                                     .alignment(Alignment::Right)
-                                    .style(Style::default().fg($config.text_color))
+                                    .style(Style::default().fg($config.text_color).bg($config.bg_color))
                         )
                         .border_type($config.border_style)
-                        .style(Style::default().fg($config.border_color)) // box color
+                        .style(Style::default().fg($config.border_color).bg($config.bg_color)) // box color
                 )
-                .style(Style::default().fg($config.text_color)); // text color
-            
+                .style(Style::default().fg($config.text_color).bg($config.bg_color)); // text color
+
             // Cursor position
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
             let newlines_before = chars_before_cursor.iter().filter(|&&c| c == '\n').count();
@@ -102,14 +101,23 @@ macro_rules! chat {
                 .take_while(|&&c| c != '\n')
                 .count();
             
-            let cursor_x = chunks[1].x + 1 + (chars_in_current_line as u16 % box_width);
-            let cursor_y = chunks[1].y + 1 + (cursor_line - scroll_offset) as u16;
-            
-            f.render_widget(input_box, chunks[1]);
+            let cursor_x = chunks[2].x + 1 + (chars_in_current_line as u16 % box_width);
+            let cursor_y = chunks[2].y + 1 + (cursor_line - scroll_offset) as u16;
+
+            // Title
+            let title = Block::default()
+                .borders(Borders::TOP)
+                .border_type($config.border_style)
+                .style(Style::default().fg($config.border_color).bg($config.bg_color))
+                .title(Line::from($choice.clone()).alignment(Alignment::Center));
+
+            // rendering
+            f.render_widget(title, chunks[0]);
+            f.render_widget(input_box, chunks[2]);
             f.set_cursor_position((cursor_x, cursor_y));
         })?;
 
         // Handle input keys
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen);
     };
 }

@@ -1,13 +1,13 @@
 use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
-use nix::unistd::Uid;
 use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
 use tokio::{task, time::{sleep, Duration, interval}, net::{TcpStream, TcpListener}, io::{AsyncReadExt, AsyncWriteExt}};
+use crate::auth::Uid;
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
 // use serde_json;
@@ -51,10 +51,7 @@ pub trait Secrecy {
 pub trait RendezVous {
     async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String)>, token: CancellationToken) -> Result<()>;
     async fn snd_requests(&mut self, name:String) -> Result<bool>;
-
-    async fn request_final_verif(&self, idx: usize) -> Result<()>;
-    async fn confirm_final_verif(&self) -> Result<()>;
-    async fn init_peer(&self) -> Result<()>;
+    async fn init_peer(&self, requests: &mut Vec<(SocketAddr, String)>, idx: usize) -> Result<()>;
 
     async fn fallback_lookup(&self) -> Result<()>;
     async fn fallback_send(&self) -> Result<()>;
@@ -291,7 +288,6 @@ impl RendezVous for Connection {
         
         Ok(())
     }
-
     async fn snd_requests(&mut self, name: String) -> Result<bool> {
         self.connect_rendezvous().await?;
         
@@ -350,15 +346,8 @@ impl RendezVous for Connection {
         
         Ok(false)
     }
-
-    async fn request_final_verif(&self, idx: usize) -> Result<()> {
-        Ok(())
-    }
-    async fn confirm_final_verif(&self) -> Result<()> {
-        Ok(())
-    }
-    async fn init_peer(&self) -> Result<()> {
-        //when we initialize a peer, we tell him about preexisting peers and update the peermap of all other peers by sending his peer info to everyone in a special packet
+    async fn init_peer(&self, requests: &mut Vec<(SocketAddr, String)>, idx: usize) -> Result<()> {
+        //when we initialize a peer, we tell him about preexisting peers and update the peermap of all other peers by sending his peer info to everyone in a special packet (should send a full db sync)
         Ok(())
     }
 

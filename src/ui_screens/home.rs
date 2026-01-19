@@ -11,7 +11,7 @@
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $chats: ident, $config: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
+    ($terminal:ident, $curr_screen: ident, $chats: ident, $choice: ident, $config: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
             $terminal.draw(|frame| {
                 let size = frame.area();
 
@@ -346,6 +346,7 @@ macro_rules! home {
                             let chosen = &$chats.available[$chats.choice];
                             $config = Config::load(CONFIG, Some(chosen))?;
                             $curr_screen = Screen::Chat;
+                            $choice = chosen.clone();
                         }
                         KeyCode::Enter if $active_section == 1 => {
                             let chat_name_valid = !$chat_name_input.is_empty();

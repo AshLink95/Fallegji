@@ -1,11 +1,10 @@
 // prompt engineered
 use std::net::SocketAddr;
 use fallegji::db::Database;
-use fallegji::auth::{Authentication, Role, User};
+use fallegji::auth::{Authentication, Role, User, Uid};
 use fallegji::messaging::Message;
 use fallegji::connection::Peer;
 use hex::ToHex;
-use nix::unistd::getuid;
 use anyhow::Result;
 use x25519_dalek::StaticSecret;
 
@@ -19,7 +18,7 @@ async fn test_create_read_user() -> Result<()> {
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     
     // Create user with peer's pubkey
-    let created: User = db.create_user(pubkey_hex.clone(), "alice".to_string(), getuid()).await?;
+    let created: User = db.create_user(pubkey_hex.clone(), "alice".to_string(), Uid::getuid()).await?;
     assert!(created.ver_id(pubkey_hex.clone(), created.get_id()));
     assert_eq!(created.get_name(), "alice");
     
@@ -44,7 +43,7 @@ async fn test_create_read_peer() -> Result<()> {
     // Create peer and associated user
     let (created, prv_key): (Peer, StaticSecret) = db.create_peer(6967).await?;
     let pubkey_hex = created.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex.clone(), "charlie".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex.clone(), "charlie".to_string(), Uid::getuid()).await?;
     
     db.update_peer_link_user(created.get_id(), user.get_id()).await?;
     
@@ -78,7 +77,7 @@ async fn test_create_read_message() -> Result<()> {
     // Setup user with linked peer (needed for read_user to work)
     let (peer, _) = db.create_peer(8080).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex.clone(), "bob".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex.clone(), "bob".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     
     // Create message
@@ -107,7 +106,7 @@ async fn test_update_user() -> Result<()> {
     // Setup
     let (peer, _) = db.create_peer(8080).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex, "alice".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex, "alice".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     
     // Update role
@@ -133,7 +132,7 @@ async fn test_update_peer() -> Result<()> {
     // Setup
     let (peer, _) = db.create_peer(7070).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex, "bob".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex, "bob".to_string(), Uid::getuid()).await?;
     
     // Update link to user
     let linked = db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
@@ -169,7 +168,7 @@ async fn test_update_message() -> Result<()> {
     // Setup
     let (peer, _) = db.create_peer(8080).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex, "charlie".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex, "charlie".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     let msg = db.create_message(user.get_id(), "Original message".to_string()).await?;
     
@@ -202,7 +201,7 @@ async fn test_delete() -> Result<()> {
     // Setup: Create user, peer, and message
     let (peer, _) = db.create_peer(8080).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = db.create_user(pubkey_hex, "delete_test".to_string(), getuid()).await?;
+    let user = db.create_user(pubkey_hex, "delete_test".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     let msg = db.create_message(user.get_id(), "Test message".to_string()).await?;
     
@@ -244,12 +243,12 @@ async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
     // Setup: Create multiple users, peers, and messages
     let (peer1, _) = db.create_peer(8080).await?;
     let pubkey1_hex = peer1.get_pubkey().to_bytes().encode_hex::<String>();
-    let user1 = db.create_user(pubkey1_hex, "alice".to_string(), getuid()).await?;
+    let user1 = db.create_user(pubkey1_hex, "alice".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer1.get_id(), user1.get_id()).await?;
     
     let (peer2, _) = db.create_peer(8081).await?;
     let pubkey2_hex = peer2.get_pubkey().to_bytes().encode_hex::<String>();
-    let user2 = db.create_user(pubkey2_hex, "bob".to_string(), getuid()).await?;
+    let user2 = db.create_user(pubkey2_hex, "bob".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer2.get_id(), user2.get_id()).await?;
     
     let _ = db.create_message(user1.get_id(), "First message".to_string()).await?;
@@ -291,11 +290,11 @@ async fn test_save_all() -> Result<()> {
     
     // Create users in memory and link to peers
     let pubkey1_hex = peer1.get_pubkey().to_bytes().encode_hex::<String>();
-    let mut user1 = User::new(pubkey1_hex.clone(), "charlie".to_string(), getuid()); // Memory
+    let mut user1 = User::new(pubkey1_hex.clone(), "charlie".to_string(), Uid::getuid()); // Memory
     user1.set_role(Role::Admin);
     
     let pubkey3_hex = peer3.get_pubkey().to_bytes().encode_hex::<String>();
-    let user2 = User::new(pubkey3_hex.clone(), "dave".to_string(), getuid()); // Memory
+    let user2 = User::new(pubkey3_hex.clone(), "dave".to_string(), Uid::getuid()); // Memory
     
     // Link peers to users in memory (no DB touch)
     let mut peer1_linked = peer1.clone();
