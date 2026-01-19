@@ -17,29 +17,29 @@ macro_rules! home {
 
                 // ASCII art
                 let ascii_art = vec![
-                    "                                       ++########++-",
-                    "                                    ##-............-###",
-                    "                                 ##.  ....... ....  . +###",
-                    "                              ##-. ..............  ..     ###",
-                    "                             #  .......... ....  .. ... .   ##",
-                    "                            #...   ...... ... . ...  ......   ##",
-                    "                           #   ..-.........  .-..  ..... ....  ##",
-                    "                           #.    .  .. .   ...      .   .     .  +",
-                    "                           #   ... ......-            .         #",
-                    "                           #      ...  .     .###.....          #",
-                    "                           ##    .- .. .############++  .      ##",
-                    "                            ## ..  . ..     ....         .   ###",
-                    "                             ##     #...+--###+.#+-    .  -  ##",
-                    "                              ## .. #####........#####-  ..  ##",
-                    "                              ##. . ###.............##.   .. ##",
-                    "                              # . ............    . ..    +  .#",
-                    "                              # . ...........    .   ...  -  +#",
-                    "                              #..   ..............     ... .+##",
-                    "                              #... ......  . .  ...... ..  . ##",
-                    "                              #-.  ..   ...        .... ...   #",
-                    "                              ##-  ..         .  .. . . ..    #",
-                    "                                #-# ##                  ..  ..#",
-                    "                                  +.+#+.           .   .     ##",
+                    "            ++########++-              ",
+                    "         ##-............-###           ",
+                    "      ##.  ....... ....  . +###        ",
+                    "   ##-. ..............  ..     ###     ",
+                    "  #  .......... ....  .. ... .   ##    ",
+                    " #...   ...... ... . ...  ......   ##  ",
+                    "#   ..-.........  .-..  ..... ....  ## ",
+                    "#.    .  .. .   ...      .   .     .  +",
+                    "#   ... ......-            .         # ",
+                    "#      ...  .     .###.....          # ",
+                    "##    .- .. .############++  .      ## ",
+                    " ## ..  . ..     ....         .   ###  ",
+                    "  ##     #...+--###+.#+-    .  -  ##   ",
+                    "   ## .. #####........#####-  ..  ##   ",
+                    "   ##. . ###.............##.   .. ##   ",
+                    "   # . ............    . ..    +  .#   ",
+                    "   # . ...........    .   ...  -  +#   ",
+                    "   #..   ..............     ... .+##   ",
+                    "   #... ......  . .  ...... ..  . ##   ",
+                    "   #-.  ..   ...        .... ...   #   ",
+                    "   ##-  ..         .  .. . . ..    #   ",
+                    "     #-# ##                  ..  ..#   ",
+                    "       +.+#+.           .   .     ##   ",
                 ];
 
                 // Calculate layout with ASCII art
@@ -58,7 +58,8 @@ macro_rules! home {
                 let ascii_text: Vec<Line> = ascii_art.iter()
                     .map(|line| Line::from(Span::styled(*line, Style::default().fg($config.border_color))))
                     .collect();
-                let ascii_paragraph = Paragraph::new(ascii_text);
+                let ascii_paragraph = Paragraph::new(ascii_text)
+                    .alignment(Alignment::Center);
                 frame.render_widget(ascii_paragraph, vertical_chunks[1]);
 
                 // Center the box
@@ -103,7 +104,7 @@ macro_rules! home {
                     .split(inner);
 
                 // Line 1: "hop into < chatname >"
-                let current_chat = $chats.current().unwrap_or("None");
+                let current_chat = $chats.current().unwrap_or(" ❌ ");
                 let hop_active = $active_section == 0;
                 let arrow_color = if hop_active { $config.text_color } else { $config.border_color };
                 let hop_text_color = if hop_active { $config.text_color } else { $config.border_color };
@@ -343,10 +344,11 @@ macro_rules! home {
                             }
                         }
                         KeyCode::Enter if $active_section == 0 => {
-                            let chosen = &$chats.available[$chats.choice];
-                            $config = Config::load(CONFIG, Some(chosen))?;
-                            $curr_screen = Screen::Chat;
-                            $choice = chosen.clone();
+                            if let Some(chosen) = &$chats.available.get($chats.choice) {
+                                $config = Config::load(CONFIG, Some(chosen))?;
+                                $curr_screen = Screen::Chat;
+                                $choice = chosen.to_string();
+                            }
                         }
                         KeyCode::Enter if $active_section == 1 => {
                             let chat_name_valid = !$chat_name_input.is_empty();

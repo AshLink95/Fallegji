@@ -2,6 +2,13 @@ use std::{fmt, str};
 use sha2::{Digest, Sha256};
 use anyhow::Result;
 
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+    System::Threading::{GetCurrentProcess, OpenProcessToken}
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role { Admin, Member }
 impl fmt::Display for Role {
@@ -38,37 +45,42 @@ impl Uid {
     #[cfg(windows)]
     pub fn getuid() -> Self {
         unsafe {
-            let mut token: HANDLE = HANDLE::default();
+            let mut token: HANDLE = 0 as HANDLE;
             
             // Open process token
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                panic!("Failed to open process token");
+            }
             
             // Get token user info
             let mut buffer = vec![0u8; 256];
             let mut return_length = 0u32;
             
-            GetTokenInformation(
+            if GetTokenInformation(
                 token,
                 TokenUser,
-                Some(buffer.as_mut_ptr() as *mut _),
+                buffer.as_mut_ptr() as *mut _,
                 buffer.len() as u32,
                 &mut return_length,
-            )?;
+            ) == 0 {
+                CloseHandle(token);
+                panic!("Failed to get token information");
+            }
             
             let token_user = &*(buffer.as_ptr() as *const TOKEN_USER);
             let sid = token_user.User.Sid;
             
             // Get RID (last subauthority)
-            let sub_authority_count = *sid.as_ptr().cast::<u8>().add(1);
-            let rid_ptr = sid.as_ptr()
+            let sub_authority_count = *sid.cast::<u8>().add(1);
+            let rid_ptr = sid
                 .cast::<u8>()
                 .add(8 + (sub_authority_count as usize - 1) * 4)
                 .cast::<u32>();
             let rid = *rid_ptr;
             
-            CloseHandle(token)?;
+            CloseHandle(token);
             
-            Ok(rid)
+            Self::from(rid)
         }
     }
 }
