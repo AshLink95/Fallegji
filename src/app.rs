@@ -52,8 +52,8 @@ pub fn app() -> Result<()> {
     let mut rendezvous_input = String::new();
 
     // Admin rendezvous state
-    let mut admin_active_section = 0;
-    let mut admin_active_field = 0;
+    let mut admin_active_section = 2;
+    let mut admin_active_field = 0; //TODO: used for selecting requests and peers
     let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
 
     // regular input box state

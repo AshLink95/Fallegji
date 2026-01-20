@@ -28,7 +28,11 @@ macro_rules! input_handling {
                 match key.code {
                     // Universal
                     KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        $seq.clear();
                         $input.clear();
+                        $cursor_pos = 0;
+                        $vim_mode = Vim::Normal;
+                        execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                         $chats = ChatChoice::load(CONFIG)?;
                         $curr_screen = Screen::Home;
                     },

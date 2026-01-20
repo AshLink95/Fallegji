@@ -5,7 +5,7 @@
 macro_rules! initServer {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_field: ident, $requests: ident, $input:ident) => {
         $terminal.draw(|f| {
-        //TODO: border, chat name in the middle of the border, at the bottom. A box just where users can click enter to go to the chat (can do that with a key stroke as well). 2 sections before in a floating box, slightly smaller than available terminal screen for them: available peers and requests. these 2 should take exaclty as much as needed and have title on the border top left
+            //TODO: update with actual peers list from connection. Also, find a way to update based on valid packets received (requests list update and peers online status). Use chat for viewing chat members (peers)
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
 
@@ -28,12 +28,22 @@ macro_rules! initServer {
                     .collect()
             };
             let line_count = (lines.len() as u16 + 2).min($config.max_height + 2);
+            drop(lines);
             
             // TUI screen separation
+            let available_peers_count = 0; // TODO: replace with actual count
+            let requests_guard = $requests.lock().unwrap();
+            let requests_count = requests_guard.len();
+            
+            let peers_height = (available_peers_count as u16 + 2).max(3);
+            let requests_height = (requests_count as u16 + 2).max(3);
+            
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
+                    Constraint::Length(peers_height),
+                    Constraint::Length(requests_height),
                     Constraint::Min(1),
                     Constraint::Length(line_count),
                 ])
@@ -45,6 +55,50 @@ macro_rules! initServer {
                 .border_type($config.border_style)
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($choice.clone()).alignment(Alignment::Center));
+
+            // Peers section
+            let peers_active = $active_section == 0;
+            let peers_border_color = if peers_active { $config.text_color } else { $config.border_color };
+            
+            let peers_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type($config.border_style)
+                .border_style(Style::default().fg(peers_border_color))
+                .style(Style::default().bg($config.bg_color))
+                .title(Line::from(" Chat Members ").alignment(Alignment::Left));
+            
+            // TODO: Add actual peers list when available
+            let peers_text = Paragraph::new("No peers available")
+                .style(Style::default().fg($config.border_color).bg($config.bg_color))
+                .block(peers_block);
+            
+            
+            // Requests section
+            let requests_active = $active_section == 1;
+            let requests_border_color = if requests_active { $config.text_color } else { $config.border_color };
+            let requests_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type($config.border_style)
+                .border_style(Style::default().fg(requests_border_color))
+                .style(Style::default().bg($config.bg_color))
+                .title(Line::from(" Requests ").alignment(Alignment::Left));
+            
+            let requests_text = if requests_guard.is_empty() {
+                vec![Line::from(Span::styled("No requests", Style::default().fg($config.border_color)))]
+            } else {
+                requests_guard.iter()
+                    .map(|(addr, _msg)| {
+                        Line::from(Span::styled(
+                            format!("{}", addr),
+                            Style::default().fg($config.users_color)
+                        ))
+                    })
+                    .collect()
+            };
+            let requests_paragraph = Paragraph::new(requests_text)
+                .style(Style::default().bg($config.bg_color))
+                .block(requests_block);
+            drop(requests_guard);
 
             // Hop back button
             let button_active = $active_section == 2;
@@ -60,22 +114,31 @@ macro_rules! initServer {
 
             // rendering
             f.render_widget(title, chunks[0]);
-            f.render_widget(button, chunks[2]);
+            f.render_widget(peers_text, chunks[1]);
+            f.render_widget(requests_paragraph, chunks[2]);
+            f.render_widget(button, chunks[4]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-
-                        $chats = ChatChoice::load(CONFIG)?;
-                        $curr_screen = Screen::Home;
+                    KeyCode::Char(aq) if key.modifiers.contains(KeyModifiers::CONTROL) && aq == 'a' || aq == 'q'=> {
+                        $curr_screen = Screen::Chat;
                     },
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) || $active_section > 0 => {
+                        if $active_section > 0 {
+                            $active_section -= 1;
+                        }
+                    },
+                    KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) || $active_section < 2 => {
+                        if $active_section < 2 {
+                            $active_section += 1;
+                        }
+                    },
+                    KeyCode::Enter if $active_section == 2 => {
                         $curr_screen = Screen::Chat;
                     },
                     _ => {}
-
                 }
             }
         }
