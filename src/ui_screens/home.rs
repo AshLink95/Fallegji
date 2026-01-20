@@ -364,10 +364,10 @@ macro_rules! home {
                         match $active_field {
                             0 if chat_name_valid => $active_field = 1,
                             1 if user_name_valid => $active_field = 2,
-                            2 if rendezvous_valid && chat_name_valid && user_name_valid => {
+                            2 if rendezvous_valid && chat_name_valid && user_name_valid => { //TODO: initialize a proper connection (will be an mut argument)
                                 let prvkey = StaticSecret::random_from_rng(OsRng);
                                 let pubkey = PublicKey::from(&prvkey);
-                                $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, 0u64, 0i32, pubkey, prvkey)?; //TODO: turn name red for unavailable
+                                $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, 0u64, 0i32, pubkey, prvkey)?;
                                 $curr_screen = Screen::InitServer;
                                 $choice = $chat_name_input.clone();
                             }

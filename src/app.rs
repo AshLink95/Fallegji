@@ -1,5 +1,5 @@
 //TODO: allow customization of border styles, max height, and colors using a toml-style dotfile. Parameters will be set in constants decided by the dotfile.
-use std::{io::{self, Write}};//, net::SocketAddr, sync::{Arc, Mutex}};
+use std::{io::{self, Write}, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
@@ -45,14 +45,16 @@ pub fn app() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // home state
-    let mut active_section = 0; // 0 = hop into, 1 = create chat
-    let mut active_field = 0; // For create chat: 0 = chat name, 1 = user name, 2 = rendezvous
+    let mut home_active_section = 0; // 0 = hop into, 1 = create chat
+    let mut home_active_field = 0; // For create chat: 0 = chat name, 1 = user name, 2 = rendezvous
     let mut chat_name_input = String::new();
     let mut user_name_input = String::new();
     let mut rendezvous_input = String::new();
 
     // Admin rendezvous state
-    // let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
+    let mut admin_active_section = 0;
+    let mut admin_active_field = 0;
+    let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;
@@ -66,9 +68,9 @@ pub fn app() -> Result<()> {
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, config, choice, chats, active_section, active_field, chat_name_input, user_name_input, rendezvous_input);
+            home!(terminal, curr_screen, config, choice, chats, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
-            initServer!(terminal, curr_screen, config, choice, chats, requests);
+            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_field, requests, input);
         } else if curr_screen == Screen::InitClient {
             initClient!(terminal, curr_screen, config);
         } else if curr_screen == Screen::Chat {

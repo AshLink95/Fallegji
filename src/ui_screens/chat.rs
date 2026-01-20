@@ -33,9 +33,9 @@ macro_rules! chat {
                     })
                     .collect()
             };
-            
             let line_count = (lines.len() as u16 + 2).min($config.max_height + 2);
             
+            // TUI screen separation
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -45,6 +45,7 @@ macro_rules! chat {
                 ])
                 .split(size);
             
+            // vim modes
             let mode = match $vim_mode {
                 Vim::Normal => "NORMAL",
                 Vim::Insert => "INSERT",

@@ -28,6 +28,7 @@ macro_rules! input_handling {
                 match key.code {
                     // Universal
                     KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        $input.clear();
                         $chats = ChatChoice::load(CONFIG)?;
                         $curr_screen = Screen::Home;
                     },
