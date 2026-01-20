@@ -53,8 +53,14 @@ pub fn app() -> Result<()> {
 
     // Admin rendezvous state
     let mut admin_active_section = 2;
-    let mut admin_active_field = 0; //TODO: used for selecting requests and peers
+    let mut admin_active_row = false; // notify/kick & accept/delete
+    let mut admin_active_col = 0;
     let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
+    // let requests = Arc::new(Mutex::new(vec![ //dbg
+    //     (SocketAddr::from(([127, 0, 0, 1], 8080)), "initial1".to_string()),
+    //     (SocketAddr::from(([127, 0, 0, 1], 8081)), "initial2".to_string()),
+    //     (SocketAddr::from(([127, 0, 0, 1], 8082)), "initial3".to_string()),
+    // ]));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;
@@ -70,7 +76,7 @@ pub fn app() -> Result<()> {
         if curr_screen == Screen::Home {
             home!(terminal, curr_screen, config, choice, chats, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input);
         } else if curr_screen == Screen::InitServer {
-            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_field, requests, input);
+            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
         } else if curr_screen == Screen::InitClient {
             initClient!(terminal, curr_screen, config);
         } else if curr_screen == Screen::Chat {
