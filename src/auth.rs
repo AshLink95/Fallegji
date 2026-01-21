@@ -114,6 +114,10 @@ impl User {
         Self { id, name, role: None, uid }
     }
 
+    pub fn sys() -> Self {
+        Self { id: 0u64, name: "System".to_string(), role: None, uid: Uid::from(0) }
+    }
+
     pub fn get_id(&self) -> u64 { self.id }
     pub fn get_name(&self) -> String { self.name.clone() }
     pub fn get_role(&self) -> Option<Role> { self.role.clone() }

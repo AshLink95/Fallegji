@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
-use tokio::{task, time::{sleep, Duration, interval}, net::{TcpStream, TcpListener}, io::{AsyncReadExt, AsyncWriteExt}};
+use tokio::{net::{TcpStream, TcpListener}, io::{AsyncReadExt, AsyncWriteExt}};
 use crate::auth::Uid;
 // use sha2::{Sha256, Digest};
 // use serde::{Serialize, Deserialize};
@@ -31,7 +31,7 @@ pub trait KeyGen {
 }
 
 /// user_id -> peer, key, socket
-type Peermap = HashMap<u64, (Peer, Key, TcpStream)>;
+pub type Peermap = HashMap<u64, (Peer, Key, TcpStream)>;
 enum RendezVousSocket { Listner(TcpListener), Streamer(TcpStream) }
 
 pub struct Connection {
@@ -143,38 +143,39 @@ impl KeyGen for Peer {
     }
 }
 
+pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
+    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+
+    let mut port = 1952;
+    let max = 74;
+
+    for _ in 0..max {
+        let addr = SocketAddr::new(ip, port);
+        
+        match TcpListener::bind(addr).await {
+            Ok(sock) => return Ok((addr, sock)),
+            Err(e) if e.to_string().contains("Address already in use") => {
+                port += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!("Too many ports in use"))
+}
+
 impl Connection {
     pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Result<Self> {
-        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-        tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-        let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-
-        let mut port = 1952;
-        let max = 74;
-
-        for _ in 0..max {
-            let addr = SocketAddr::new(ip, port);
-            
-            match TcpListener::bind(addr).await {
-                Ok(tl) => {
-                    let socket = (addr, tl);
-                    return Ok(Self {
-                        prvkey,
-                        socket,
-                        peers: Arc::new(Mutex::new(HashMap::new())),
-                        rendezvous: (rendezvous_addr, None)
-                    });
-                }
-                Err(e) if e.to_string().contains("Address already in use") => {
-                    port += 1;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        Err(anyhow::anyhow!("Too many ports in use"))
-
+        let socket = get_free_port().await?;
+        Ok(Self {
+            prvkey,
+            socket,
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            rendezvous: (rendezvous_addr, None)
+        })
     }
 
     pub async fn monitor_ip(&mut self) -> Result<()> { // bg task
@@ -211,6 +212,8 @@ impl Connection {
     }
 
     pub fn end_rendezvous(&mut self) { self.rendezvous.1 = None; }
+
+    pub fn get_addr(&self) -> SocketAddr { self.socket.0 }
 }
 
 impl Secrecy for Connection {

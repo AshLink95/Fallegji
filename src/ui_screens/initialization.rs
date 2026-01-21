@@ -4,6 +4,7 @@
 macro_rules! initServer {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident) => {
         $terminal.draw(|f| {
+            //TODO: add a way of listening for requests
             //TODO: update with actual peers list from connection. Also, find a way to update based on valid packets received (requests list update and peers online status). Use chat for viewing chat members (peers)
             let size = f.area();
             let box_width = size.width.saturating_sub(2);

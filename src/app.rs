@@ -17,13 +17,14 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::Connection, messaging::Chat, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
 use x25519_dalek::{PublicKey, StaticSecret};
 use chacha20poly1305::aead::OsRng; //dbg
+use tokio_util::sync::CancellationToken;
 
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }
@@ -51,10 +52,17 @@ pub fn app() -> Result<()> {
     let mut user_name_input = String::new();
     let mut rendezvous_input = String::new();
 
-    // Admin rendezvous state
+    // App meat: Connection and Chat
+    let mut conn: Connection;
+    let mut chat: Chat;
+    let startstuffnew = || {};
+    let startstuffold = || {};
+
+    // Admin rendezvous state (TODO: add admin check from chat struct instance)
     let mut admin_active_section = 2;
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
+    let token = CancellationToken::new();
     let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
     // let requests = Arc::new(Mutex::new(vec![ //dbg
     //     (SocketAddr::from(([127, 0, 0, 1], 8080)), "initial1".to_string()),
