@@ -24,7 +24,6 @@ macro_rules! home {
             _ => false,
         };
 
-        $run_once = true;
         $terminal.draw(|frame| {
             let size = frame.area();
 
@@ -359,7 +358,9 @@ macro_rules! home {
                             $config = Config::load(CONFIG, Some(chosen))?;
                             $curr_screen = Screen::Chat;
                             $choice = chosen.to_string();
-                            ($conn, $chat) = startstuffold(&$choice, &$config, &mut $run_once).await?;
+                            let cc = startstuffold(&$choice, &$config, &mut $run_once).await?;
+                            $conn = Some(cc.0);
+                            $chat = Some(cc.1);
                         }
                     }
                     KeyCode::Enter if $active_section == 1 => {
@@ -368,9 +369,13 @@ macro_rules! home {
                             1 if user_name_valid => $active_field = 2,
                             2 if rendezvous_valid && chat_name_valid && user_name_valid => {
                                 $choice = $chat_name_input.clone();
-                                let (mut prvkey, mut pubkey): (StaticSecret, PublicKey);
-                                let (mut user_id, mut peer_id): (u64, i32);
-                                ($conn, $chat, prvkey, pubkey, user_id, peer_id) = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
+                                let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
+                                $conn = Some(ccppup.0);
+                                $chat = Some(ccppup.1);
+                                let prvkey = ccppup.2;
+                                let pubkey = ccppup.3;
+                                let user_id = ccppup.4;
+                                let peer_id = ccppup.5;
                                 $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
                                 $curr_screen = Screen::InitServer;
                             }

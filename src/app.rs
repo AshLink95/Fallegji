@@ -1,4 +1,4 @@
-use std::{io::{self, Write}, net::SocketAddr, sync::{Arc, Mutex}};
+use std::{io, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
@@ -74,23 +74,16 @@ pub async fn app() -> Result<()> {
     let mut rendezvous_input = String::new();
 
     // App meat: Connection and Chat
-    let mut conn: Connection;
-    let mut chat: Chat;
-    let mut run_once_dum = true;
-    (_, chat, _, _, _, _) = startstuffnew("test", "user", "1.1.1.1:1", &mut run_once_dum).await?; //dbg
-    let mut run_once;
+    let mut conn: Option<Connection> = None;
+    let mut chat: Option<Chat> = None;
+    let mut run_once: bool = true;
 
-    // Admin rendezvous state (TODO: add admin check from chat struct instance)
+    // Admin rendezvous state
     let mut admin_active_section = 2;
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
     // let token = CancellationToken::new();
     let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
-    // let requests = Arc::new(Mutex::new(vec![ //dbg
-    //     (SocketAddr::from(([127, 0, 0, 1], 8080)), "initial1".to_string()),
-    //     (SocketAddr::from(([127, 0, 0, 1], 8081)), "initial2".to_string()),
-    //     (SocketAddr::from(([127, 0, 0, 1], 8082)), "initial3".to_string()),
-    // ]));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;
@@ -105,12 +98,15 @@ pub async fn app() -> Result<()> {
     loop {
         if curr_screen == Screen::Home {
             home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, run_once);
-        } else if curr_screen == Screen::InitServer {
+        } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
+            && let Some(ref conn) = conn {
             initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
-        } else if curr_screen == Screen::InitClient {
-            initClient!(terminal, curr_screen, config);
-        } else if curr_screen == Screen::Chat {
-            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
+        } else if curr_screen == Screen::InitClient && let Some(ref chat) = chat
+            && let Some(ref conn) = conn {
+                initClient!(terminal, curr_screen, config);
+        } else if curr_screen == Screen::Chat && let Some(ref chat) = chat
+            && let Some(ref conn) = conn {
+                chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
         }
     }
 
