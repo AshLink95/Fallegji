@@ -41,6 +41,7 @@ async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<
     if !*ran {
         return Err(anyhow::anyhow!("startstuffold already ran"));
     }
+    //TODO: generate user from key and uid then check with ver_id
     let socket = get_free_port().await?;
     let prvkey = config.prvkey.as_ref().unwrap().clone();
     let (chat, peermap) = Chat::old(choice, config.user_name.as_ref().unwrap(), prvkey.clone()).await?;
