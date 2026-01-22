@@ -32,6 +32,8 @@ async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, ran: &mu
     let (addr, listener) = get_free_port().await?;
     let (chat, prvkey, pubkey, user_id, peer_id, peermap) = Chat::new(choice, user_name, addr.port()).await?;
     let conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
+    //TODO: start listening for requests
+
     *ran = false;
     Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
 }
@@ -43,9 +45,12 @@ async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<
     let prvkey = config.prvkey.as_ref().unwrap().clone();
     let (chat, peermap) = Chat::old(choice, config.user_name.as_ref().unwrap(), prvkey.clone()).await?;
     let conn = Connection::new(prvkey, config.rendezvous.unwrap(), socket, peermap).await;
+    //TODO: start listening for requests
+
     *ran = false;
     Ok((conn, chat))
 }
+//TODO: startstuff new and old for noon-admin members
 
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }

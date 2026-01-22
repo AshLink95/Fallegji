@@ -11,6 +11,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 <!-- Connection Types (P2P and group chats) -->
 
 # advanced VIM motions checklist:
+- [ ] allow messages scrolling (`<C-j/k>`)
 - [ ] Implement `iw`, `i(`, `aw`, `a[` and such sequences
 - [ ] Implement `f`, `F`, `t` and `T`
 - [ ] replace and replace mode
@@ -21,7 +22,8 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Macros (might be a stretch)
 
 # General checklist
-- [ ] allow `\` commands in-text. Start with the ability to send files
+- [ ] allow `\` commands in-text
+- [ ] allow sending files
 
 
 # Home Menu
