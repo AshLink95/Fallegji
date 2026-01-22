@@ -99,7 +99,7 @@ impl Chat {
             if let Some(peer_user_id) = peer.get_user_id() {
                 peers.insert(peer_user_id, peer.clone());
                 let shared_key = peer.shrdkeygen(prvkey.clone());
-                let tcp_stream = TcpStream::connect(peer.get_addr()).await?;
+                let tcp_stream = TcpStream::connect(peer.get_addr()).await.ok();
                 peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
             }
         }
@@ -123,4 +123,4 @@ impl Chat {
 //TODO: presence update (if last heartbeat is None, users are online)
 //TODO: typing_indicators - show when peer is typing (special message packets)
 //TODO: read_receipts - notify when messages are seen (last heartbeat time > sent time)
-//TODO: db syncs (when connecting and when exiting only)
+//TODO: db updates and syncs (when connecting and when exiting only)

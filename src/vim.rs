@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $chats: ident, $is_admin: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -35,6 +35,7 @@ macro_rules! input_handling {
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                         $chats = ChatChoice::load(CONFIG)?;
                         $curr_screen = Screen::Home;
+                        $run_once = true;
                     },
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
                         $curr_screen = Screen::InitServer;
@@ -96,7 +97,11 @@ macro_rules! input_handling {
                     KeyCode::Enter => { // NOTE: Specific to this app
                         if n==0 { n = 1 };
                         for _ in 0..n.min(10) {
-std::fs::OpenOptions::new().create(true).append(true).open("file.txt")?.write_all(format!("{}\n", $input).as_bytes())?; // dbg: print/send n times (up to 10)
+                            if !$input.is_empty() {
+                                let sender_id = $chat.current_user.get_id();
+                                let message = Message::new(-1, sender_id, $input.clone());
+                                $chat.message_history.write().unwrap().push(message);
+                            }
                         }
                         $seq.clear();
                         $input.clear();

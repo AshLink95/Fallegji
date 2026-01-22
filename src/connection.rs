@@ -31,7 +31,7 @@ pub trait KeyGen {
 }
 
 /// user_id -> peer, key, socket
-pub type Peermap = HashMap<u64, (Peer, Key, TcpStream)>;
+pub type Peermap = HashMap<u64, (Peer, Key, Option<TcpStream>)>;
 enum RendezVousSocket { Listner(TcpListener), Streamer(TcpStream) }
 
 pub struct Connection {

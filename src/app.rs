@@ -16,7 +16,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::Chat, auth::Role, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::{Message, Chat}, auth::Role, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
@@ -110,7 +110,7 @@ pub async fn app() -> Result<()> {
         } else if curr_screen == Screen::InitClient {
             initClient!(terminal, curr_screen, config);
         } else if curr_screen == Screen::Chat {
-            chat!(terminal, curr_screen, config, choice, chats, conn, chat, vim_mode, seq, input, cursor_pos, persis_y);
+            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
         }
     }
 

@@ -721,15 +721,16 @@ impl Database {
                 .query_map([], |row| row.get(0))?
                 .collect::<Result<_, _>>()?;
             
-            // Build set of new message IDs
+            // Build set of new message IDs (excluding invalid ones)
             let new_ids: HashSet<i32> = messages.iter()
                 .map(|m| m.get_id())
+                .filter(|&id| id >= 0)
                 .collect();
             
             // Update existing messages first
             for message in &messages {
                 let id = message.get_id();
-                if existing_ids.contains(&id) {
+                if id >= 0 && existing_ids.contains(&id) {
                     // Update existing
                     conn.execute(
                         "UPDATE messages SET sender_id = ?1, contents = ?2, sent_at = ?3 WHERE id = ?4",
@@ -748,15 +749,14 @@ impl Database {
                 conn.execute("DELETE FROM messages WHERE id = ?1", params![old_id])?;
             }
             
-            // Insert new messages
+            // Insert new messages (let database auto-generate IDs for invalid ones)
             for message in &messages {
                 let id = message.get_id();
-                if !existing_ids.contains(&id) {
-                    // Insert new
+                if id < 0 || !existing_ids.contains(&id) {
+                    // Insert new (omit id to let database auto-generate)
                     conn.execute(
-                        "INSERT INTO messages (id, sender_id, contents, sent_at) VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO messages (sender_id, contents, sent_at) VALUES (?1, ?2, ?3)",
                         params![
-                            id,
                             message.get_sender_id().to_string(),
                             message.get_contents(),
                             message.get_sent_at()

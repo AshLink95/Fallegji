@@ -273,6 +273,7 @@ impl Config {
         }
     }
     
+    #[allow(clippy::too_many_arguments)]
     pub fn save<P: AsRef<Path>>(path: P, chat_name: &str, user_name: &str, rendezvous: &str, user_id: u64, peer_id: i32, pubkey: PublicKey, prvkey: StaticSecret) -> Result<Self> {
         // Load existing config or create new
         let mut toml_config = if path.as_ref().exists() {

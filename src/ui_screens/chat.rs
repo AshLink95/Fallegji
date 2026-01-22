@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -109,7 +109,7 @@ macro_rules! chat {
                 let name_color = if sender_id == current_user_id {
                     $config.my_color
                 } else if sender_id == 0 {
-                    $config.border_color
+                    $config.system_color
                 } else {
                     $config.users_color
                 };
@@ -158,6 +158,6 @@ macro_rules! chat {
         let is_admin = if let Some(role) = $chat.current_user.get_role() {
             role == Role::Admin
         } else { false };
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats, is_admin);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats, $conn, $chat, $run_once, is_admin);
     };
 }
