@@ -155,6 +155,9 @@ macro_rules! chat {
         })?;
 
         // Handle input keys
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats);
+        let is_admin = if let Some(role) = $chat.current_user.get_role() {
+            role == Role::Admin
+        } else { false };
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats, is_admin);
     };
 }

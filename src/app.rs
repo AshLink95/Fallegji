@@ -1,4 +1,3 @@
-//TODO: allow customization of border styles, max height, and colors using a toml-style dotfile. Parameters will be set in constants decided by the dotfile.
 use std::{io::{self, Write}, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
@@ -17,25 +16,24 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::Chat, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::Chat, auth::Role, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
 use x25519_dalek::{PublicKey, StaticSecret};
-use chacha20poly1305::aead::OsRng; //dbg
 // use tokio_util::sync::CancellationToken;
 
 // initiation functions
-async fn startstuffnew(choice: &str, config: &Config, ran: &mut bool) -> Result<(Connection, Chat)> {
+async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, ran: &mut bool) -> Result<(Connection, Chat, StaticSecret, PublicKey, u64, i32)> {
     if !*ran {
         return Err(anyhow::anyhow!("startstuffnew already ran"));
     }
     let (addr, listener) = get_free_port().await?;
-    let (chat, prvkey, peermap) = Chat::new(choice, config.user_name.as_ref().unwrap(), addr.port()).await?;
-    let conn = Connection::new(prvkey, config.rendezvous.unwrap(), (addr, listener), peermap).await;
+    let (chat, prvkey, pubkey, user_id, peer_id, peermap) = Chat::new(choice, user_name, addr.port()).await?;
+    let conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
     *ran = false;
-    Ok((conn, chat))
+    Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
 }
 async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<(Connection, Chat)> {
     if !*ran {
@@ -79,10 +77,8 @@ pub async fn app() -> Result<()> {
     let mut conn: Connection;
     let mut chat: Chat;
     let mut run_once_dum = true;
-    choice = String::from("test 2"); //dbg
-    config = Config::load(CONFIG, Some(&choice))?; //dbg
-    (_, chat) = startstuffnew(&choice, &config, &mut run_once_dum).await?; //dbg
-    let mut run_once = true;
+    (_, chat, _, _, _, _) = startstuffnew("test", "user", "1.1.1.1:1", &mut run_once_dum).await?; //dbg
+    let mut run_once;
 
     // Admin rendezvous state (TODO: add admin check from chat struct instance)
     let mut admin_active_section = 2;

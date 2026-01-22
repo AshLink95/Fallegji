@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, RwLock}};
 use anyhow::Result;
 use tokio::net::TcpStream;
-use x25519_dalek::StaticSecret;
+use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
-use crate::{auth::{User, Uid}, connection::{Peer, Peermap, KeyGen}, db::Database};
+use crate::{auth::{Role, Uid, User}, connection::{KeyGen, Peer, Peermap}, db::Database};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -37,16 +37,20 @@ impl Message {
 }
 
 impl Chat {
-    pub async fn new(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, Peermap)> {
+    pub async fn new(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, PublicKey, u64, i32, Peermap)> {
         let db_path = format!("{}.db", chat_name);
         let db = Database::new(&db_path)?;
 
         let (peer, prvkey) = db.create_peer(port).await?;
-        let pubkey_hex = hex::encode(peer.get_pubkey().as_bytes());
+        let peer_id = peer.get_id();
+        let pubkey = peer.get_pubkey();
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
 
         let uid = Uid::getuid();
-        let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
+        let mut current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
+        current_user.set_role(Role::Admin);
         let user_id = current_user.get_id();
+        db.update_user_role(user_id, Role::Admin).await?;
         db.update_peer_link_user(peer.get_id(), user_id).await?;
 
         db.delete_user(0).await?;
@@ -68,7 +72,7 @@ impl Chat {
             peers: Arc::new(RwLock::new(peers)),
             current_user,
             db
-        }, prvkey, peermap))
+        }, prvkey, pubkey, user_id, peer_id, peermap))
     }
 
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {

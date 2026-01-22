@@ -366,13 +366,13 @@ macro_rules! home {
                         match $active_field {
                             0 if chat_name_valid => $active_field = 1,
                             1 if user_name_valid => $active_field = 2,
-                            2 if rendezvous_valid && chat_name_valid && user_name_valid => { //TODO: initialize a proper connection (will be an mut argument) (CHANGE ORDER)
-                                let prvkey = StaticSecret::random_from_rng(OsRng);
-                                let pubkey = PublicKey::from(&prvkey);
-                                $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, 0u64, 0i32, pubkey, prvkey)?;
-                                $curr_screen = Screen::InitServer;
+                            2 if rendezvous_valid && chat_name_valid && user_name_valid => {
                                 $choice = $chat_name_input.clone();
-                                ($conn, $chat) = startstuffnew(&$choice, &$config, &mut $run_once).await?;
+                                let (mut prvkey, mut pubkey): (StaticSecret, PublicKey);
+                                let (mut user_id, mut peer_id): (u64, i32);
+                                ($conn, $chat, prvkey, pubkey, user_id, peer_id) = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
+                                $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
+                                $curr_screen = Screen::InitServer;
                             }
                             _ => {}
                         }
