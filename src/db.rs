@@ -67,6 +67,18 @@ impl Database {
             Ok( user )
         }).await?
     }
+    pub async fn create_sys(&self) -> Result<User> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let sys = User::sys();
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
+                params![ sys.get_id().to_string(), sys.get_name(), None::<&str>, 0 ],
+            )?;
+            Ok( sys )
+        }).await?
+    }
     /// Peer creation
     pub async fn create_peer(&self, port: u16) -> Result<(Peer, StaticSecret)> {
         let conn = Arc::clone(&self.conn);

@@ -12,7 +12,7 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $run_once: ident) => {
         // Validity checks
         let chat_name_valid = !$chat_name_input.is_empty() &&
             !$chats.available.contains(&$chat_name_input);
@@ -24,6 +24,7 @@ macro_rules! home {
             _ => false,
         };
 
+        $run_once = true;
         $terminal.draw(|frame| {
             let size = frame.area();
 
@@ -354,22 +355,24 @@ macro_rules! home {
                         }
                     }
                     KeyCode::Enter if $active_section == 0 => {
-                        if let Some(chosen) = &$chats.available.get($chats.choice) {
+                        if let Some(chosen) = $chats.available.get($chats.choice) {
                             $config = Config::load(CONFIG, Some(chosen))?;
                             $curr_screen = Screen::Chat;
                             $choice = chosen.to_string();
+                            ($conn, $chat) = startstuffold(&$choice, &$config, &mut $run_once).await?;
                         }
                     }
                     KeyCode::Enter if $active_section == 1 => {
                         match $active_field {
                             0 if chat_name_valid => $active_field = 1,
                             1 if user_name_valid => $active_field = 2,
-                            2 if rendezvous_valid && chat_name_valid && user_name_valid => { //TODO: initialize a proper connection (will be an mut argument)
+                            2 if rendezvous_valid && chat_name_valid && user_name_valid => { //TODO: initialize a proper connection (will be an mut argument) (CHANGE ORDER)
                                 let prvkey = StaticSecret::random_from_rng(OsRng);
                                 let pubkey = PublicKey::from(&prvkey);
                                 $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, 0u64, 0i32, pubkey, prvkey)?;
                                 $curr_screen = Screen::InitServer;
                                 $choice = $chat_name_input.clone();
+                                ($conn, $chat) = startstuffnew(&$choice, &$config, &mut $run_once).await?;
                             }
                             _ => {}
                         }

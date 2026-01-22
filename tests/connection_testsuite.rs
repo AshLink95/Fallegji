@@ -1,9 +1,9 @@
 // prompt engineered
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
+use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
 use tokio::sync::Mutex;
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous}, messaging::Message, auth::Uid};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, get_free_port}, messaging::Message, auth::Uid};
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
 use anyhow::Result;
@@ -167,7 +167,9 @@ fn test_secrecy() {
 async fn test_connection() -> Result<()> {
     let keypair = Peer::keypairgen()?;
     let rendezvous_addr: SocketAddr = "127.0.0.1:6666".parse().unwrap();
-    let mut conn = Connection::new(keypair.1, rendezvous_addr).await?;
+    let socket = get_free_port().await?;
+    let peermap = HashMap::new();
+    let mut conn = Connection::new(keypair.1, rendezvous_addr, socket, peermap).await;
     let bind_result = conn.bind_rendezvous().await;
     assert!(bind_result.is_ok(), "Failed to bind rendezvous");
     conn.end_rendezvous();
@@ -175,7 +177,9 @@ async fn test_connection() -> Result<()> {
     assert!(double_bind.is_ok(), "Double bind failed");
 
     let keypair2 = Peer::keypairgen()?;
-    let mut client_conn = Connection::new(keypair2.1, rendezvous_addr).await?;
+    let socket2 = get_free_port().await?;
+    let peermap2 = HashMap::new();
+    let mut client_conn = Connection::new(keypair2.1, rendezvous_addr, socket2, peermap2).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let connect_result = client_conn.connect_rendezvous().await;
@@ -201,8 +205,12 @@ async fn test_rendezvous_requests() -> Result<()> {
     let rendezvous_addr: SocketAddr = "127.0.0.1:5555".parse().unwrap();
     let server_keypair = Peer::keypairgen()?;
     let client_keypair = Peer::keypairgen()?;
-    let mut server_conn = Connection::new(server_keypair.1, rendezvous_addr).await?;
-    let mut client_conn = Connection::new(client_keypair.1, rendezvous_addr).await?;
+    let server_socket = get_free_port().await?;
+    let client_socket = get_free_port().await?;
+    let server_peermap = HashMap::new();
+    let client_peermap = HashMap::new();
+    let mut server_conn = Connection::new(server_keypair.1, rendezvous_addr, server_socket, server_peermap).await;
+    let mut client_conn = Connection::new(client_keypair.1, rendezvous_addr, client_socket, client_peermap).await;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_clone = Arc::clone(&requests);
     let token = CancellationToken::new();

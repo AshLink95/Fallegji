@@ -5,7 +5,15 @@
 # my_color = [255, 60, 100]
 
 [test]
+user_id = 0
 user_name = "AshLink"
+peer_id = 0
+rendezvous = "1.1.1.1:1"
+pubkey = "3af81202424f821d03d35a83297482298204647076fb15f0b13d9e32f0c8100f"
+prvkey = "1c7ba3e8baa91eb716cab60853f36dc034b849e4908be29b9f6320df4a4dae37"
 
 ["test 2"]
 user_name = "LinkAsh"
+rendezvous = "1.1.1.1:1"
+pubkey = "2bb89ab0047fec5ad331a6461ed8d1af40360d82346adcbcc8c07f24c900de7d"
+prvkey = "a152d05433367e327b11b81c61212b95b473b48482100f7f531a32df421678f0"

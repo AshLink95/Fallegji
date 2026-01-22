@@ -168,14 +168,13 @@ pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
 }
 
 impl Connection {
-    pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr) -> Result<Self> {
-        let socket = get_free_port().await?;
-        Ok(Self {
+    pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr, socket: (SocketAddr, TcpListener), peermap: Peermap ) -> Self {
+        Self {
             prvkey,
             socket,
-            peers: Arc::new(Mutex::new(HashMap::new())),
+            peers: Arc::new(Mutex::new(peermap)),
             rendezvous: (rendezvous_addr, None)
-        })
+        }
     }
 
     pub async fn monitor_ip(&mut self) -> Result<()> { // bg task

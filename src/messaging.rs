@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, RwLock}};
 use anyhow::Result;
+use tokio::net::TcpStream;
 use x25519_dalek::StaticSecret;
 use time::OffsetDateTime;
-use crate::{auth::{User, Uid}, connection::{Peer, Peermap}, db::Database};
+use crate::{auth::{User, Uid}, connection::{Peer, Peermap, KeyGen}, db::Database};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -13,10 +14,10 @@ pub struct Message {
 }
 
 pub struct Chat {
-    message_history: Arc<RwLock<Vec<Message>>>,
-    members: Arc<RwLock<HashMap<u64, User>>>, // user_id -> User
-    peers: Arc<RwLock<HashMap<u64, Peer>>>, // user_id -> Peer
-    current_user: User,
+    pub message_history: Arc<RwLock<Vec<Message>>>,
+    pub members: Arc<RwLock<HashMap<u64, User>>>, // user_id -> User
+    pub peers: Arc<RwLock<HashMap<u64, Peer>>>, // user_id -> Peer
+    pub current_user: User,
     db: Database
 }
 
@@ -46,44 +47,56 @@ impl Chat {
         let uid = Uid::getuid();
         let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
         let user_id = current_user.get_id();
+        db.update_peer_link_user(peer.get_id(), user_id).await?;
 
-        let system_message = db.create_message(0, format!("Chat '{}' created by {}", chat_name, user_name)).await?;
-        
-        let message_history = vec![system_message];
+        db.delete_user(0).await?;
+        let sys = db.create_sys().await?;
         let mut members = HashMap::new();
         members.insert(user_id, current_user.clone());
+        members.insert(0u64, sys);
+
+        let system_message = db.create_message(0, format!("Chat '{}' created by {}", chat_name, user_name)).await?;
+        let message_history = vec![system_message];
+
         let peermap = Peermap::new();
+        let mut peers = HashMap::new();
+        peers.insert(user_id, peer);
 
         Ok((Self {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
-            peers: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(RwLock::new(peers)),
             current_user,
             db
         }, prvkey, peermap))
     }
 
-    pub async fn old(chat_name: &str, user_name: &str) -> Result<Self> {
+    pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {
         let db_path = format!("{}.db", chat_name);
         let db = Database::new(&db_path)?;
         let message_history = db.load_all_messages().await?;
         let all_users = db.load_all_users().await?;
         let all_peers = db.load_all_peers().await?;
-        
+
+        let mut current_user_id: u64 = 0;
         let mut members = HashMap::new();
         members.insert(0u64, User::sys());
         for user in all_users {
+            if user.get_name() == user_name { current_user_id = user.get_id(); }
             members.insert(user.get_id(), user);
         }
-        
-        let uid = Uid::getuid();
-        let current_user = db.read_user(uid.as_raw() as u64).await?
+
+        let current_user = db.read_user(current_user_id).await?
             .ok_or_else(|| anyhow::anyhow!("User not found in database"))?;
 
-        let mut peers_map = HashMap::new();
+        let mut peers = HashMap::new();
+        let mut peersmap = HashMap::new();
         for peer in all_peers {
             if let Some(peer_user_id) = peer.get_user_id() {
-                peers_map.insert(peer_user_id, peer);
+                peers.insert(peer_user_id, peer.clone());
+                let shared_key = peer.shrdkeygen(prvkey.clone());
+                let tcp_stream = TcpStream::connect(peer.get_addr()).await?;
+                peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
             }
         }
 
@@ -91,13 +104,13 @@ impl Chat {
         let mut message_history_vec = message_history;
         message_history_vec.push(join_message);
 
-        Ok(Self {
+        Ok((Self {
             message_history: Arc::new(RwLock::new(message_history_vec)),
             members: Arc::new(RwLock::new(members)),
-            peers: Arc::new(RwLock::new(peers_map)),
+            peers: Arc::new(RwLock::new(peers)),
             current_user,
             db
-        })
+        }, peersmap))
     }
 }
 

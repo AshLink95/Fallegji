@@ -7,6 +7,7 @@ use std::path::Path;
 use std::net::SocketAddr;
 use x25519_dalek::{PublicKey, StaticSecret};
 use anyhow::Result;
+use hex::{encode, decode};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TomlConfig {
@@ -58,6 +59,8 @@ pub struct ChatConfig {
     pub user_name: Option<String>,
     pub peer_id: Option<i32>,
     pub rendezvous: Option<SocketAddr>,
+    pub pubkey: Option<String>,
+    pub prvkey: Option<String>,
     
     // Optional overrides for cosmetic configs
     pub border_style: Option<String>,
@@ -79,6 +82,7 @@ pub struct ChatChoice {
     pub choice: usize
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
@@ -189,13 +193,29 @@ impl Config {
             .and_then(|c| c.max_height)
             .unwrap_or(toml.max_height);
         
+        let pubkey = chat_config
+            .and_then(|c| c.pubkey.as_ref())
+            .and_then(|s| decode(s).ok())
+            .and_then(|bytes| {
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                Some(PublicKey::from(arr))
+            });
+        
+        let prvkey = chat_config
+            .and_then(|c| c.prvkey.as_ref())
+            .and_then(|s| decode(s).ok())
+            .and_then(|bytes| {
+                let arr: [u8; 32] = bytes.try_into().ok()?;
+                Some(StaticSecret::from(arr))
+            });
+        
         Self {
             user_id: chat_config.and_then(|c| c.user_id),
             user_name: chat_config.and_then(|c| c.user_name.clone()),
             peer_id: chat_config.and_then(|c| c.peer_id),
             rendezvous: chat_config.and_then(|c| c.rendezvous),
-            pubkey: None, // These need separate handling/loading
-            prvkey: None,
+            pubkey,
+            prvkey,
             
             border_style: parse_border_style(border_style_str),
             max_height,
@@ -301,6 +321,8 @@ impl Config {
             user_name: Some(String::from(user_name)),
             peer_id: Some(peer_id),
             rendezvous: Some(rendezvous.parse::<SocketAddr>()?),
+            pubkey: Some(encode(pubkey.as_bytes())),
+            prvkey: Some(encode(prvkey.as_bytes())),
             border_style: None, // Don't save cosmetic overrides by default
             max_height: None,
             bg_color: None,

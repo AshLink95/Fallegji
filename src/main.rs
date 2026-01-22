@@ -10,8 +10,9 @@ mod config;
 
 use anyhow::Result;
 
-fn main() -> Result<()> {
-    app::app()?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    app::app().await?;
 
     Ok(())
 }

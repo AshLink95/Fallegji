@@ -17,21 +17,44 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::Connection, messaging::Chat, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::Chat, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
 use x25519_dalek::{PublicKey, StaticSecret};
 use chacha20poly1305::aead::OsRng; //dbg
-use tokio_util::sync::CancellationToken;
+// use tokio_util::sync::CancellationToken;
+
+// initiation functions
+async fn startstuffnew(choice: &str, config: &Config, ran: &mut bool) -> Result<(Connection, Chat)> {
+    if !*ran {
+        return Err(anyhow::anyhow!("startstuffnew already ran"));
+    }
+    let (addr, listener) = get_free_port().await?;
+    let (chat, prvkey, peermap) = Chat::new(choice, config.user_name.as_ref().unwrap(), addr.port()).await?;
+    let conn = Connection::new(prvkey, config.rendezvous.unwrap(), (addr, listener), peermap).await;
+    *ran = false;
+    Ok((conn, chat))
+}
+async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<(Connection, Chat)> {
+    if !*ran {
+        return Err(anyhow::anyhow!("startstuffold already ran"));
+    }
+    let socket = get_free_port().await?;
+    let prvkey = config.prvkey.as_ref().unwrap().clone();
+    let (chat, peermap) = Chat::old(choice, config.user_name.as_ref().unwrap(), prvkey.clone()).await?;
+    let conn = Connection::new(prvkey, config.rendezvous.unwrap(), socket, peermap).await;
+    *ran = false;
+    Ok((conn, chat))
+}
 
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }
 lazy_static::lazy_static! {
     static ref RE_CHR: Regex = Regex::new(r"[a-zA-Z]+").unwrap();
 }
-pub fn app() -> Result<()> {
+pub async fn app() -> Result<()> {
     // Config file (TODO: change to `~/.fallgejirc` in prod)
     static CONFIG: &str = "fallegji.toml";
     let mut chats = ChatChoice::load(CONFIG)?;
@@ -55,14 +78,17 @@ pub fn app() -> Result<()> {
     // App meat: Connection and Chat
     let mut conn: Connection;
     let mut chat: Chat;
-    let startstuffnew = || {};
-    let startstuffold = || {};
+    let mut run_once_dum = true;
+    choice = String::from("test 2"); //dbg
+    config = Config::load(CONFIG, Some(&choice))?; //dbg
+    (_, chat) = startstuffnew(&choice, &config, &mut run_once_dum).await?; //dbg
+    let mut run_once = true;
 
     // Admin rendezvous state (TODO: add admin check from chat struct instance)
     let mut admin_active_section = 2;
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
-    let token = CancellationToken::new();
+    // let token = CancellationToken::new();
     let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
     // let requests = Arc::new(Mutex::new(vec![ //dbg
     //     (SocketAddr::from(([127, 0, 0, 1], 8080)), "initial1".to_string()),
@@ -82,13 +108,13 @@ pub fn app() -> Result<()> {
     #[allow(unused)] //macros are weird
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, config, choice, chats, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input);
+            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, run_once);
         } else if curr_screen == Screen::InitServer {
             initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
         } else if curr_screen == Screen::InitClient {
             initClient!(terminal, curr_screen, config);
         } else if curr_screen == Screen::Chat {
-            chat!(terminal, curr_screen, config, choice, chats, vim_mode, seq, input, cursor_pos, persis_y);
+            chat!(terminal, curr_screen, config, choice, chats, conn, chat, vim_mode, seq, input, cursor_pos, persis_y);
         }
     }
 

@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -95,6 +95,41 @@ macro_rules! chat {
                 )
                 .style(Style::default().fg($config.text_color).bg($config.bg_color)); // text color
 
+            // Messages section
+            let message_history = $chat.message_history.read().unwrap();
+            let members = $chat.members.read().unwrap();
+            let current_user_id = $chat.current_user.get_id();
+
+            let message_lines: Vec<Line> = message_history.iter().map(|msg| {
+                let sender_id = msg.get_sender_id();
+                let user_name = members.get(&sender_id)
+                    .map(|u| u.get_name())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                
+                let name_color = if sender_id == current_user_id {
+                    $config.my_color
+                } else if sender_id == 0 {
+                    $config.border_color
+                } else {
+                    $config.users_color
+                };
+
+                Line::from(vec![
+                    Span::styled(format!("{}: ", user_name), Style::default().fg(name_color)),
+                    Span::styled(msg.get_contents(), Style::default().fg($config.text_color)),
+                ])
+            }).collect();
+
+            drop(message_history);
+            drop(members);
+
+            let messages_widget = Paragraph::new(message_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::NONE)
+                )
+                .style(Style::default().bg($config.bg_color));
+
             // Cursor position
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
             let newlines_before = chars_before_cursor.iter().filter(|&&c| c == '\n').count();
@@ -114,6 +149,7 @@ macro_rules! chat {
 
             // rendering
             f.render_widget(title, chunks[0]);
+            f.render_widget(messages_widget, chunks[1]);
             f.render_widget(input_box, chunks[2]);
             f.set_cursor_position((cursor_x, cursor_y));
         })?;
