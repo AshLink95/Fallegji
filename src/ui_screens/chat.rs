@@ -51,7 +51,7 @@ macro_rules! chat {
                 Vim::Insert => "INSERT",
             };
 
-            // Scrolling
+            // Input Box Scrolling (TODO: make scrolling work by pushing extremes not just bottm line)
             let mut scroll_offset = 0usize;
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
             let newlines_before = chars_before_cursor.iter().filter(|&&c| c == '\n').count();
@@ -95,7 +95,7 @@ macro_rules! chat {
                 )
                 .style(Style::default().fg($config.text_color).bg($config.bg_color)); // text color
 
-            // Messages section
+            // Messages section (TODO: make text wrap, show multilines (with clear indicators, exp: line below user name until message end, follow text way of wrapping) add allow scrolling with a clickable sidebar)
             let message_history = $chat.message_history.read().unwrap();
             let members = $chat.members.read().unwrap();
             let current_user_id = $chat.current_user.get_id();
@@ -151,13 +151,13 @@ macro_rules! chat {
             f.render_widget(title, chunks[0]);
             f.render_widget(messages_widget, chunks[1]);
             f.render_widget(input_box, chunks[2]);
-            f.set_cursor_position((cursor_x, cursor_y));
+            f.set_cursor_position((cursor_x, cursor_y)); //ERROR (bugs when newline after wrapping)
         })?;
 
         // Handle input keys
         let is_admin = if let Some(role) = $chat.current_user.get_role() {
             role == Role::Admin
         } else { false };
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $chats, $conn, $chat, $run_once, is_admin);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin);
     };
 }

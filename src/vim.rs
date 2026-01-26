@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -35,6 +35,7 @@ macro_rules! input_handling {
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                         $chats = ChatChoice::load(CONFIG)?;
                         $curr_screen = Screen::Home;
+                        $config = Config::load(CONFIG, None)?;
                         $run_once = true;
                     },
                     KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
@@ -90,7 +91,7 @@ macro_rules! input_handling {
                         }
                         $seq.clear();
                     },
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) && $vim_mode == Vim::Insert => { // NOTE: Specific to this app, allows new lines in messages
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) && $vim_mode == Vim::Insert => { // NOTE: Specific to this app, allows new lines in messages
                         $input.insert($cursor_pos, '\n');
                         $cursor_pos += 1;
                     },
@@ -770,6 +771,10 @@ macro_rules! input_handling {
                         }
                         $vim_mode = Vim::Normal;
                         execute!(io::stdout(), SetCursorStyle::SteadyBlock);
+                    },
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Insert => {
+                        $input.insert($cursor_pos, '\n');
+                        $cursor_pos += 1;
                     },
                     KeyCode::Char(c) if $vim_mode == Vim::Insert => {
                         $input.insert($cursor_pos, c);
