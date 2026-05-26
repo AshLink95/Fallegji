@@ -156,7 +156,7 @@ pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
         
         match TcpListener::bind(addr).await {
             Ok(sock) => return Ok((addr, sock)),
-            Err(e) if e.to_string().contains("Address already in use") => {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 port += 1;
                 continue;
             }

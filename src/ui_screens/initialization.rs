@@ -1,11 +1,12 @@
-// Client: 1 box saying pending approval if the request went through, otherwise tells the user the address may not be valid. Retry option available after 3 minutes.
-
 #[macro_export]
 macro_rules! initServer {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident) => {
         $terminal.draw(|f| {
             //TODO: add a way of listening for requests
-            //TODO: update with actual peers list from connection. Also, find a way to update based on valid packets received (requests list update and peers online status). Use chat for viewing chat members (peers)
+            //TODO: send a packet for seen(received) requests
+            //TODO: update with actual peers list from connection.
+            // Also, find a way to update based on valid packets (heartbeats) received (requests list update and peers online status).
+            // Use chat for viewing chat members (peers)
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
 
@@ -106,7 +107,7 @@ macro_rules! initServer {
 
                 for (idx, (addr, name)) in requests_guard.iter().enumerate() {
                     let row_active = requests_active && $active_col == idx as i32;
-                    
+
                     let button_layout = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([
@@ -125,7 +126,7 @@ macro_rules! initServer {
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
                     let addr_text = Paragraph::new(format!("{}", addr))
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
-                    
+
                     let accept_active = row_active && $active_row;
                     let accept_color = if accept_active { $config.my_color } else { $config.border_color };
                     let accept_button = Paragraph::new("Accept")
@@ -139,10 +140,10 @@ macro_rules! initServer {
 
                     let delete_active = row_active && !$active_row;
                     let delete_color = if delete_active {
-                        if !is_red { 
-                            Color::Red 
-                        } else { 
-                            Color::Rgb(255, 100, 0) 
+                        if !is_red {
+                            Color::Red
+                        } else {
+                            Color::Rgb(255, 100, 0)
                         }
                     } else {
                         $config.border_color
@@ -184,43 +185,45 @@ macro_rules! initServer {
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char(aq) if key.modifiers.contains(KeyModifiers::CONTROL) && aq == 'a' || aq == 'q'=> {
-                        $curr_screen = Screen::Chat;
-                    },
-                    KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
-                        if $active_col > 0 {
-                            $active_col -= 1;
-                        }
-                    },
-                    KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
-                        let requests_guard = $requests.lock().unwrap();
-                        let max_row = requests_guard.len() as i32 - 1;
-                        drop(requests_guard);
-                        if $active_col < max_row {
-                            $active_col += 1;
-                        }
-                    },
-                    KeyCode::Char('h') | KeyCode::Left if $active_section == 1 => {
-                        $active_row = true;
-                    },
-                    KeyCode::Char('l') | KeyCode::Right if $active_section == 1 => {
-                        $active_row = false;
-                    },
-                    KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) && $active_section > 0 => {
-                        if $active_section > 0 {
-                            $active_section -= 1;
-                        }
-                    },
-                    KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) && $active_section < 2 => {
-                        if $active_section < 2 {
-                            $active_section += 1;
-                        }
-                    },
-                    KeyCode::Enter if $active_section == 2 => {
-                        $curr_screen = Screen::Chat;
-                    },
-                    _ => {}
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char(aq) if key.modifiers.contains(KeyModifiers::CONTROL) && aq == 'a' || aq == 'q'=> {
+                            $curr_screen = Screen::Chat;
+                        },
+                        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
+                            if $active_col > 0 {
+                                $active_col -= 1;
+                            }
+                        },
+                        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
+                            let requests_guard = $requests.lock().unwrap();
+                            let max_row = requests_guard.len() as i32 - 1;
+                            drop(requests_guard);
+                            if $active_col < max_row {
+                                $active_col += 1;
+                            }
+                        },
+                        KeyCode::Char('h') | KeyCode::Left if $active_section == 1 => {
+                            $active_row = true;
+                        },
+                        KeyCode::Char('l') | KeyCode::Right if $active_section == 1 => {
+                            $active_row = false;
+                        },
+                        KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) && $active_section > 0 => {
+                            if $active_section > 0 {
+                                $active_section -= 1;
+                            }
+                        },
+                        KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) && $active_section < 2 => {
+                            if $active_section < 2 {
+                                $active_section += 1;
+                            }
+                        },
+                        KeyCode::Enter if $active_section == 2 => {
+                            $curr_screen = Screen::Chat;
+                        },
+                        _ => {}
+                    }
                 }
             }
         }
@@ -229,8 +232,173 @@ macro_rules! initServer {
 
 #[macro_export]
 macro_rules! initClient {
-    ($terminal:ident, $curr_screen: ident, $config: ident) => {
-        //TODO
+    ($terminal:ident, $curr_screen: ident, $config: ident, $rendezvous_input: ident, $anim_tick: ident) => {
+        //TODO: receive a packet when the request is seen(received) by the server/admin
+        //TODO: Allows resending after a cooldown which increases if the user isn't banned.
+        // Said cooldown follows the pattern: 3 increasing shorts, 1 long
+
+            // ASCII art
+            let ascii_loop1 = vec![
+"                                                                            .+##    ##           ",
+"                                                                      #####-+#####- ####+        ",
+"                                                                  +##--##++++ --###     ###      ",
+"                                                                 +        # .+.  .#####          ",
+"                                                           ## #- .#           ...     +####      ",
+"                                                         #   # #  -#  ####+.  +                  ",
+"                                                      ######+### #   .-     .   #########        ",
+"                                                          - ### -.+     -.#####-    -            ",
+"                                                    ####- #.#     +-        . +#####             ",
+"                                                    +#+.# #   ##.   +#+      .##                 ",
+"                                                    +.#.# ##-. #.        +####                   ",
+"                                                    +  #+.-#-    ##+#      .                     ",
+"                                                   .#.#+ #  ##+#. .#+##. ##                      ",
+"                                                   +  - #  ##    #   ######                      ",
+"                                                   ##+#+#+#  +#- ## #. ##+                       ",
+"                                                # +    ##  ###    #+#+###                        ",
+"                                       -#######   ###..# +###- ##    .##                         ",
+"                                        +###    # .# ##  ## ## #.###+.##                         ",
+"                                         -##.##   .# .##  +### #  ####.                          ",
+"                                    -++++ ####-.#. ## #++#     +#   +#                           ",
+"                                 .-+-         # +#    -   +#   ##  -+#-                          ",
+"                                .              #  #####   +# #     ##                            ",
+"                                 **#####       + -#   ####-+ .#   .                              ",
+"                                        ### ##### # # +#    -#####+                              ",
+"                                          .####   #   -.   # - - .                               ",
+"                                              ##### ++  ##..###-+###                             ",
+"                                                  ###########.####    #######+++                 ",
+"                                                             ##+####  #####-+###                 ",
+"                                                                 ######+-  -. -##                ",
+"                                                                    ############                 ",
+"                                                                      ##                         ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+            ];
+
+            let ascii_loop2 = vec![
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                 ##  +##         ",
+"                                                                           ###+###     #####     ",
+"                                                                +##.-##--+        #####+   -###  ",
+"                                                          .-+##  ##+#   -...   -#+    #########  ",
+"                                                    ++.++#### .##     -    +. -++###########+    ",
+"     .           +++-  -#++-.       -++++ ####-..+.-  ##+#   #+.  #-##. #########                ",
+"  .. +###.  . -###-##-# # +  .-##.-+-         # #####  # +#+##--##. +######                      ",
+"   +###  ### #   #  # #  #+#####.              # -   -#+ ## # -  #####                           ",
+"     ###  ##.##+####+#+##        **#####       +# ###. # .  #####+                               ",
+"        ##  ##                       .##.### ## -# # # + ###.                                    ",
+"                                         ###-.#    +## #### #### #                               ",
+"                                              ##### ++  ##..###-+###                             ",
+"                                                  ###########.####    #######+++                 ",
+"                                                             ##+####  #####-+###                 ",
+"                                                                 ######+-  -. -##                ",
+"                                                                    ############                 ",
+"                                                                      ##                         ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+"                                                                                                 ",
+            ];
+
+        $terminal.draw(|f| {
+            let size = f.area();
+            let box_width = size.width.saturating_sub(2);
+
+            let line_count = 3;
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(line_count),
+                ])
+                .split(size);
+
+            let title = Block::default()
+                .borders(Borders::TOP)
+                .border_type($config.border_style)
+                .style(Style::default().fg($config.border_color).bg($config.bg_color))
+                .title(Line::from($rendezvous_input.clone()).alignment(Alignment::Center));
+
+            let status_color = $config.border_color; //TODO: my_color for seen, delete color for blocked or deleted
+            let status_txt = "sent"; // TODO: (after 10 seconds, tell the client that the address is not valid), seen, deleted or blocked
+            let status_anim = String::from(".").repeat(($anim_tick/2) % 3 + 1);
+            let status = Paragraph::new(Line::from(vec![
+                Span::styled("status: ", Style::default().fg($config.border_color).bg($config.bg_color)),
+                Span::styled(format!("{status_txt}{status_anim}"), Style::default().fg(status_color).bg($config.bg_color)),
+            ]))
+            .style(Style::default().bg($config.bg_color));
+
+            let button_color = $config.my_color; //TODO: bg color when on cd, delete color for Unsend
+            let button_txt   = "Resend Request"; //TODO: Resend Request or Unsend
+            let button = Paragraph::new(button_txt)
+                .centered()
+                .style(Style::default().fg($config.text_color).bg(button_color))
+                .block(
+                    Block::default().borders(Borders::ALL)
+                        .border_type($config.border_style)
+                        .style(Style::default().fg(button_color).bg($config.bg_color))
+                );
+
+            let frame: &Vec<&str> = if ($anim_tick/3) % 2 == 0 { &ascii_loop1 } else { &ascii_loop2 };
+            let area = chunks[1];
+            let top_pad = (area.height as usize).saturating_sub(frame.len()) / 2;
+            let mut anim_lines: Vec<Line> = (0..top_pad).map(|_| Line::from("")).collect();
+            anim_lines.extend(frame.iter().map(|line| {
+                Line::from(Span::styled(*line, Style::default().fg($config.border_color)))
+            }));
+            let anim = Paragraph::new(anim_lines)
+                .alignment(Alignment::Center);
+
+            f.render_widget(title, chunks[0]);
+            f.render_widget(anim, chunks[1]);
+            f.render_widget(status, chunks[2]);
+            f.render_widget(button, chunks[3]);
+        })?;
+
+        $anim_tick = $anim_tick.wrapping_add(1);
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            execute!(io::stdout(), SetCursorStyle::SteadyBlock);
+                            $curr_screen = Screen::Home;
+                            $config = Config::load(CONFIG, None)?;
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        }
     };
 }
-

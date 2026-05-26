@@ -17,7 +17,7 @@ macro_rules! home {
         let chat_name_valid = !$chat_name_input.is_empty() &&
             !$chats.available.contains(&$chat_name_input);
         let user_name_valid = !$user_name_input.is_empty();
-        let rendezvous_valid = !$rendezvous_input.is_empty() && 
+        let rendezvous_valid = !$rendezvous_input.is_empty() &&
             $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
         let is_red = match $config.my_color {
             Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => true,
@@ -92,7 +92,7 @@ macro_rules! home {
                 .border_type($config.border_style)
                 .border_style(Style::default().fg($config.border_color))
                 .style(Style::default().bg($config.bg_color));
-            
+
             let inner = block.inner(center_area);
             frame.render_widget(block, center_area);
 
@@ -120,7 +120,7 @@ macro_rules! home {
             let hop_active = $active_section == 0;
             let arrow_color = if hop_active { $config.text_color } else { $config.border_color };
             let hop_text_color = if hop_active { $config.text_color } else { $config.border_color };
-            
+
             let hop_header = Paragraph::new(
                 Line::from(vec![
                     Span::styled("hop into old chat", hop_text_color)
@@ -133,14 +133,14 @@ macro_rules! home {
                 Span::styled(current_chat, Style::default().fg($config.my_color)),
                 Span::styled(" >", Style::default().fg(arrow_color)),
             ]);
-            
+
             let hop_paragraph = Paragraph::new(hop_line)
                 .alignment(Alignment::Center)
                 .style(Style::default().bg($config.bg_color));
-            
+
             frame.render_widget(hop_header, lines_layout[0]);
             frame.render_widget(hop_paragraph, lines_layout[2]);
-            
+
             // Separator
             let separator = Paragraph::new("─".repeat(center_area.width.saturating_sub(2) as usize))
                 .alignment(Alignment::Center)
@@ -165,16 +165,16 @@ macro_rules! home {
             frame.render_widget(create_header, lines_layout[4]);
 
             // Chat name field
-            let chat_name_color = if chat_name_valid { 
-                $config.my_color 
-            } else if !is_red { 
-                Color::Red 
-            } else { 
-                Color::Rgb(255, 100, 0) 
+            let chat_name_color = if chat_name_valid {
+                $config.my_color
+            } else if !is_red {
+                Color::Red
+            } else {
+                Color::Rgb(255, 100, 0)
             };
             let chat_name_active = create_active && $active_field == 0;
             let chat_name_label_color = if chat_name_active { $config.text_color } else { $config.border_color };
-            
+
             let mut chat_name_spans = vec![
                 Span::styled("chat name: ", Style::default().fg(chat_name_label_color)),
             ];
@@ -207,12 +207,12 @@ macro_rules! home {
             frame.render_widget(user_name_paragraph, lines_layout[6]);
 
             // Rendezvous address field
-            let rendezvous_color = if rendezvous_valid { 
-                $config.my_color 
-            } else if !is_red { 
-                Color::Red 
-            } else { 
-                Color::Rgb(255, 100, 0) 
+            let rendezvous_color = if rendezvous_valid {
+                $config.my_color
+            } else if !is_red {
+                Color::Red
+            } else {
+                Color::Rgb(255, 100, 0)
             };
             let rendezvous_active = create_active && $active_field == 2;
             let rendezvous_label_color = if rendezvous_active { $config.text_color } else { $config.border_color };
@@ -253,7 +253,7 @@ macro_rules! home {
             // Join user name field
             let join_user_name_active = join_active && $active_field == 0;
             let join_user_name_label_color = if join_user_name_active { $config.text_color } else { $config.border_color };
-            
+
             let mut join_user_name_spans = vec![
                 Span::styled("user name: ", Style::default().fg(join_user_name_label_color)),
             ];
@@ -288,142 +288,144 @@ macro_rules! home {
         // Handle input
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
 
-                    KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if $active_section == 1 && $active_field > 0 {
-                            $active_field -= 1;
-                        } else if $active_section == 1 && $active_field == 0 {
-                            $active_section = 0;
-                        } else if $active_section == 2 && $active_field > 0 {
-                            $active_field -= 1;
-                        } else if $active_section == 2 && $active_field == 0 {
-                            $active_section = 1;
-                            $active_field = 2;
-                        }
-                    }
-                    KeyCode::Up => {
-                        if $active_section == 1 && $active_field > 0 {
-                            $active_field -= 1;
-                        } else if $active_section == 1 && $active_field == 0 {
-                            $active_section = 0;
-                        } else if $active_section == 2 && $active_field > 0 {
-                            $active_field -= 1;
-                        } else if $active_section == 2 && $active_field == 0 {
-                            $active_section = 1;
-                            $active_field = 2;
-                        }
-                    }
-                    KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if $active_section == 0 {
-                            $active_section = 1;
-                            $active_field = 0;
-                        } else if $active_section == 1 && $active_field < 2 {
-                            $active_field += 1;
-                        } else if $active_section == 1 && $active_field == 2 {
-                            $active_section = 2;
-                            $active_field = 0;
-                        } else if $active_section == 2 && $active_field < 1 {
-                            $active_field += 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if $active_section == 0 {
-                            $active_section = 1;
-                            $active_field = 0;
-                        } else if $active_section == 1 && $active_field < 2 {
-                            $active_field += 1;
-                        } else if $active_section == 1 && $active_field == 2 {
-                            $active_section = 2;
-                            $active_field = 0;
-                        } else if $active_section == 2 && $active_field < 1 {
-                            $active_field += 1;
-                        }
-                    }
-                    KeyCode::Left | KeyCode::Char('h') if $active_section == 0 => {
-                        if $chats.choice > 0 {
-                            $chats.choice -= 1;
-                        } else if !$chats.available.is_empty() {
-                            $chats.choice = $chats.available.len() - 1;
-                        }
-                    }
-                    KeyCode::Right | KeyCode::Char('l') if $active_section == 0 => {
-                        if !$chats.available.is_empty() {
-                            $chats.choice = ($chats.choice + 1) % $chats.available.len();
-                        }
-                    }
-                    KeyCode::Enter if $active_section == 0 => {
-                        if let Some(chosen) = $chats.available.get($chats.choice) {
-                            $config = Config::load(CONFIG, Some(chosen))?;
-                            $curr_screen = Screen::Chat;
-                            $choice = chosen.to_string();
-                            let cc = startstuffold(&$choice, &$config, &mut $run_once).await?;
-                            $conn = Some(cc.0);
-                            $chat = Some(cc.1);
-                        }
-                    }
-                    KeyCode::Enter if $active_section == 1 => {
-                        match $active_field {
-                            0 if chat_name_valid => $active_field = 1,
-                            1 if user_name_valid => $active_field = 2,
-                            2 if rendezvous_valid && chat_name_valid && user_name_valid => {
-                                $choice = $chat_name_input.clone();
-                                let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
-                                $conn = Some(ccppup.0);
-                                $chat = Some(ccppup.1);
-                                let prvkey = ccppup.2;
-                                let pubkey = ccppup.3;
-                                let user_id = ccppup.4;
-                                let peer_id = ccppup.5;
-                                $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
-                                $curr_screen = Screen::InitServer;
+                        KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if $active_section == 1 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 1 && $active_field == 0 {
+                                $active_section = 0;
+                            } else if $active_section == 2 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 2 && $active_field == 0 {
+                                $active_section = 1;
+                                $active_field = 2;
                             }
-                            _ => {}
                         }
-                    }
-                    KeyCode::Enter if $active_section == 2 => {
-                        match $active_field {
-                            0 if user_name_valid => $active_field = 1,
-                            1 if rendezvous_valid && user_name_valid => {
-                                // TODO: Get into InitClient
-                                // $user_name_input, $rendezvous_input
-                                break;
+                        KeyCode::Up => {
+                            if $active_section == 1 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 1 && $active_field == 0 {
+                                $active_section = 0;
+                            } else if $active_section == 2 && $active_field > 0 {
+                                $active_field -= 1;
+                            } else if $active_section == 2 && $active_field == 0 {
+                                $active_section = 1;
+                                $active_field = 2;
                             }
-                            _ => {}
                         }
-                    }
-                    KeyCode::Char(c) if $active_section == 1 => {
-                        match $active_field {
-                            0 => $chat_name_input.push(c),
-                            1 => $user_name_input.push(c),
-                            2 => $rendezvous_input.push(c),
-                            _ => {}
+                        KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if $active_section == 0 {
+                                $active_section = 1;
+                                $active_field = 0;
+                            } else if $active_section == 1 && $active_field < 2 {
+                                $active_field += 1;
+                            } else if $active_section == 1 && $active_field == 2 {
+                                $active_section = 2;
+                                $active_field = 0;
+                            } else if $active_section == 2 && $active_field < 1 {
+                                $active_field += 1;
+                            }
                         }
-                    }
-                    KeyCode::Char(c) if $active_section == 2 => {
-                        match $active_field {
-                            0 => $user_name_input.push(c),
-                            1 => $rendezvous_input.push(c),
-                            _ => {}
+                        KeyCode::Down => {
+                            if $active_section == 0 {
+                                $active_section = 1;
+                                $active_field = 0;
+                            } else if $active_section == 1 && $active_field < 2 {
+                                $active_field += 1;
+                            } else if $active_section == 1 && $active_field == 2 {
+                                $active_section = 2;
+                                $active_field = 0;
+                            } else if $active_section == 2 && $active_field < 1 {
+                                $active_field += 1;
+                            }
                         }
-                    }
-                    KeyCode::Backspace if $active_section == 1 => {
-                        match $active_field {
-                            0 => { $chat_name_input.pop(); },
-                            1 => { $user_name_input.pop(); },
-                            2 => { $rendezvous_input.pop(); },
-                            _ => {}
+                        KeyCode::Left | KeyCode::Char('h') if $active_section == 0 => {
+                            if $chats.choice > 0 {
+                                $chats.choice -= 1;
+                            } else if !$chats.available.is_empty() {
+                                $chats.choice = $chats.available.len() - 1;
+                            }
                         }
-                    }
-                    KeyCode::Backspace if $active_section == 2 => {
-                        match $active_field {
-                            0 => { $user_name_input.pop(); },
-                            1 => { $rendezvous_input.pop(); },
-                            _ => {}
+                        KeyCode::Right | KeyCode::Char('l') if $active_section == 0 => {
+                            if !$chats.available.is_empty() {
+                                $chats.choice = ($chats.choice + 1) % $chats.available.len();
+                            }
                         }
+                        KeyCode::Enter if $active_section == 0 => {
+                            if let Some(chosen) = $chats.available.get($chats.choice) {
+                                $config = Config::load(CONFIG, Some(chosen))?;
+                                $curr_screen = Screen::Chat;
+                                $choice = chosen.to_string();
+                                let cc = startstuffold(&$choice, &$config, &mut $run_once).await?;
+                                $conn = Some(cc.0);
+                                $chat = Some(cc.1);
+                            }
+                        }
+                        KeyCode::Enter if $active_section == 1 => {
+                            match $active_field {
+                                0 if chat_name_valid => $active_field = 1,
+                                1 if user_name_valid => $active_field = 2,
+                                2 if rendezvous_valid && chat_name_valid && user_name_valid => {
+                                    $choice = $chat_name_input.clone();
+                                    let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
+                                    $conn = Some(ccppup.0);
+                                    $chat = Some(ccppup.1);
+                                    let prvkey = ccppup.2;
+                                    let pubkey = ccppup.3;
+                                    let user_id = ccppup.4;
+                                    let peer_id = ccppup.5;
+                                    $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
+                                    $curr_screen = Screen::InitServer;
+                                }
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Enter if $active_section == 2 => {
+                            match $active_field {
+                                0 if user_name_valid => $active_field = 1,
+                                1 if rendezvous_valid && user_name_valid => {
+                                    $curr_screen = Screen::InitClient;
+                                    //TODO: must establish conn and create chat
+                                    // $user_name_input, $rendezvous_input
+                                }
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Char(c) if $active_section == 1 => {
+                            match $active_field {
+                                0 => $chat_name_input.push(c),
+                                1 => $user_name_input.push(c),
+                                2 => $rendezvous_input.push(c),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Char(c) if $active_section == 2 => {
+                            match $active_field {
+                                0 => $user_name_input.push(c),
+                                1 => $rendezvous_input.push(c),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Backspace if $active_section == 1 => {
+                            match $active_field {
+                                0 => { $chat_name_input.pop(); },
+                                1 => { $user_name_input.pop(); },
+                                2 => { $rendezvous_input.pop(); },
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Backspace if $active_section == 2 => {
+                            match $active_field {
+                                0 => { $user_name_input.pop(); },
+                                1 => { $rendezvous_input.pop(); },
+                                _ => {}
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }

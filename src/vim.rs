@@ -25,762 +25,764 @@ macro_rules! input_handling {
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
-                match key.code {
-                    // Universal
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        $seq.clear();
-                        $input.clear();
-                        $cursor_pos = 0;
-                        $vim_mode = Vim::Normal;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-                        $chats = ChatChoice::load(CONFIG)?;
-                        $curr_screen = Screen::Home;
-                        $config = Config::load(CONFIG, None)?;
-                        $run_once = true;
-                    },
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
-                        $curr_screen = Screen::InitServer;
-                    },
-                    KeyCode::Left => {
-                        $cursor_pos = $cursor_pos.saturating_sub(1);
-                        $persis_y = 0;
-                    },
-                    KeyCode::Right => if $cursor_pos < $input.len() {
-                        $cursor_pos += 1;
-                        $persis_y = 0;
-                    },
-                    KeyCode::Up => {
-                        let lines: Vec<&str> = $input.split('\n').collect();
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
-                        let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                        
-                        $persis_y = $persis_y.max(current_col);
-                        if newlines_before > 0 {
-                            let prev_line_len = lines[newlines_before - 1].chars().count();
-                            let target_col = $persis_y.min(prev_line_len);
-                            
-                            $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
-                        }
-                    },
-                    KeyCode::Down => {
-                        let lines: Vec<&str> = $input.split('\n').collect();
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
-                        let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                        
-                        $persis_y = $persis_y.max(current_col);
-                        if newlines_before < lines.len() - 1 {
-                            let current_line_len = lines[newlines_before].chars().count();
-                            let next_line_len = lines[newlines_before + 1].chars().count();
-                            let target_col = $persis_y.min(next_line_len);
-                            
-                            $cursor_pos += (current_line_len - current_col) + 1 + target_col;
-                        }
-                    },
-                    KeyCode::Delete => {
-                        if n==0 { n+=1 };
-                        while n>0 {
-                            if $cursor_pos < $input.len() {
-                                $input.remove($cursor_pos);
-                                if ($cursor_pos == $input.len()) {
-                                    $cursor_pos = $cursor_pos.saturating_sub(1);
-                                }
-                            }
-                            n = n.saturating_sub(1);
-                        }
-                        $seq.clear();
-                    },
-                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) && $vim_mode == Vim::Insert => { // NOTE: Specific to this app, allows new lines in messages
-                        $input.insert($cursor_pos, '\n');
-                        $cursor_pos += 1;
-                    },
-                    KeyCode::Enter => { // NOTE: Specific to this app
-                        if n==0 { n = 1 };
-                        for _ in 0..n.min(10) {
-                            if !$input.is_empty() {
-                                let sender_id = $chat.current_user.get_id();
-                                let message = Message::new(-1, sender_id, $input.clone());
-                                $chat.message_history.write().unwrap().push(message);
-                            }
-                        }
-                        $seq.clear();
-                        $input.clear();
-                        $cursor_pos = 0;
-                    },
-
-                    // NORMAL mode handling
-                    KeyCode::Char('0') if n==0 && $vim_mode == Vim::Normal => {
-                        let start = $cursor_pos;
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-
-                        $cursor_pos = line_start;
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain($cursor_pos..start);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain($cursor_pos..start);
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => {}
-                        }
-                    },
-                    KeyCode::Char(n) if n.is_ascii_digit() && $vim_mode == Vim::Normal => {
-                        $seq.push(n);
-                    }
-                    KeyCode::Esc if $vim_mode == Vim::Normal => { $seq.clear() },
-                    KeyCode::Char('h') if $vim_mode == Vim::Normal => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-
-                        $persis_y = 0;
-                        while n>0 && $cursor_pos > line_start {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        // Universal
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            $seq.clear();
+                            $input.clear();
+                            $cursor_pos = 0;
+                            $vim_mode = Vim::Normal;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBlock);
+                            $chats = ChatChoice::load(CONFIG)?;
+                            $curr_screen = Screen::Home;
+                            $config = Config::load(CONFIG, None)?;
+                            $run_once = true;
+                        },
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
+                            $curr_screen = Screen::InitServer;
+                        },
+                        KeyCode::Left => {
                             $cursor_pos = $cursor_pos.saturating_sub(1);
-                            n = n.saturating_sub(1);
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain($cursor_pos..start);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain($cursor_pos..start);
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char('l') if $vim_mode == Vim::Normal => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $persis_y = 0;
-                        while n>0 && $cursor_pos < line_end.saturating_sub(1) {
-                            if $cursor_pos < $input.len().saturating_sub(1) {
-                                $cursor_pos += 1;
-                            };
-                            n = n.saturating_sub(1);
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain(start..$cursor_pos);
-                                $cursor_pos = start;
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain(start..$cursor_pos);
-                                $cursor_pos = start;
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char('j') if $vim_mode == Vim::Normal => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        
-                        while n>0 {
+                            $persis_y = 0;
+                        },
+                        KeyCode::Right => if $cursor_pos < $input.len() {
+                            $cursor_pos += 1;
+                            $persis_y = 0;
+                        },
+                        KeyCode::Up => {
                             let lines: Vec<&str> = $input.split('\n').collect();
                             let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
                             let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
                             let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                            
+
                             $persis_y = $persis_y.max(current_col);
-                            
+                            if newlines_before > 0 {
+                                let prev_line_len = lines[newlines_before - 1].chars().count();
+                                let target_col = $persis_y.min(prev_line_len);
+
+                                $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
+                            }
+                        },
+                        KeyCode::Down => {
+                            let lines: Vec<&str> = $input.split('\n').collect();
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                            let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+
+                            $persis_y = $persis_y.max(current_col);
                             if newlines_before < lines.len() - 1 {
                                 let current_line_len = lines[newlines_before].chars().count();
                                 let next_line_len = lines[newlines_before + 1].chars().count();
                                 let target_col = $persis_y.min(next_line_len);
-                                
+
                                 $cursor_pos += (current_line_len - current_col) + 1 + target_col;
                             }
-                            n = n.saturating_sub(1);
-                        }
-
-                        if let Some(c) = $input.chars().nth($cursor_pos) {
-                            if c == '\n' {
-                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                                    .map(|pos| pos + 1)
-                                    .unwrap_or(0);
-                                
-                                if $cursor_pos > line_start {
-                                    $cursor_pos = $cursor_pos.saturating_sub(1);
-                                }
-                            }
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
-                                $cursor_pos = start.min($cursor_pos);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
-                                $cursor_pos = start.min($cursor_pos);
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char('k') if $vim_mode == Vim::Normal => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        
-                        while n>0 {
-                            let lines: Vec<&str> = $input.split('\n').collect();
-                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                            let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
-                            let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                            $persis_y = $persis_y.max(current_col);
-                            
-                            if newlines_before > 0 {
-                                let prev_line_len = lines[newlines_before - 1].chars().count();
-                                let target_col = $persis_y.min(prev_line_len);
-                                
-                                $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
-                            }
-                            n = n.saturating_sub(1);
-                        }
-
-                        if let Some(c) = $input.chars().nth($cursor_pos) {
-                            if c == '\n' {
-                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                                    .map(|pos| pos + 1)
-                                    .unwrap_or(0);
-                                
-                                if $cursor_pos > line_start {
-                                    $cursor_pos = $cursor_pos.saturating_sub(1);
-                                }
-                            }
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
-                                $cursor_pos = start.min($cursor_pos);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
-                                $cursor_pos = start.min($cursor_pos);
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char('$') if $vim_mode == Vim::Normal => {
-                        let start = $cursor_pos;
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-
-                        if line_end > line_start {
-                            $cursor_pos = line_end.saturating_sub(1);
-                        } else {
-                            $cursor_pos = line_start;
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain(start..($cursor_pos + 1));
-                                $cursor_pos = start.saturating_sub(1);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain(start..($cursor_pos + 1));
-                                $cursor_pos = start;
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='^' || s=='_') => {
-                        let start = $cursor_pos;
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $cursor_pos = line_start;
-                        $persis_y = 0;
-                        while $cursor_pos < line_end {
-                            if let Some(c) = $input.chars().nth($cursor_pos) {
-                                if !c.is_whitespace() || c == '\n' {
-                                    break;
-                                }
-                            }
-                            $cursor_pos += 1;
-                        }
-                        if $cursor_pos >= line_end {
-                            $cursor_pos = line_start;
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                let (left, right) = if start < $cursor_pos {
-                                    (start, $cursor_pos)
-                                } else {
-                                    ($cursor_pos, start)
-                                };
-                                $input.drain(left..right);
-                                $cursor_pos = left;
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                let (left, right) = if start < $cursor_pos {
-                                    (start, $cursor_pos)
-                                } else {
-                                    ($cursor_pos, start)
-                                };
-                                $input.drain(left..right);
-                                $cursor_pos = left;
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char(w) if $vim_mode == Vim::Normal && (w=='w' || w=='W') => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        
-                        while n>0 {
-                            while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos += 1;
-                            }
-                            while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos += 1;
-                            }
-                            $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
-                            n = n.saturating_sub(1);
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain(start..$cursor_pos);
-                                $cursor_pos = start;
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain(start..$cursor_pos);
-                                $cursor_pos = start;
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char(b) if $vim_mode == Vim::Normal && (b=='b' || b=='B') => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        
-                        while n>0 {
-                            if $cursor_pos > 0 { $cursor_pos -= 1; }
-                            while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos -= 1;
-                            }
-                            while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                $cursor_pos -= 1;
-                            }
-                            if $cursor_pos > 0 { $cursor_pos += 1; }
-                            n = n.saturating_sub(1);
-                        }
-                        
-                        match k {
-                            Some("d") => {
-                                $input.drain($cursor_pos..start);
-                                $seq.clear();
-                            },
-                            Some("c") => {
-                                $input.drain($cursor_pos..start);
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
-                        if n==0 { n=1 };
-                        let start = $cursor_pos;
-                        
-                        while n>0 {
-                            match k {
-                                Some("g") | Some("dg") | Some("cg") => {
-                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
-                                    while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                        $cursor_pos -= 1;
-                                    }
-                                    while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                        $cursor_pos -= 1;
-                                    }
-                                    while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                        $cursor_pos += 1;
-                                    }
-                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
-                                },
-                                _ => {
-                                    if $cursor_pos < $input.len() { $cursor_pos += 1; }
-                                    while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                        $cursor_pos += 1;
-                                    }
-                                    while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
-                                        $cursor_pos += 1;
-                                    }
-                                    if $cursor_pos > 0 { $cursor_pos -= 1; }
-                                }
-                            }
-                            n = n.saturating_sub(1);
-                        }
-
-                        let (left, right) = if start < $cursor_pos {
-                            (start, $cursor_pos + 1)
-                        } else {
-                            ($cursor_pos, start + 1)
-                        };
-
-                        match k {
-                            Some("d") | Some("dg") => {
-                                $input.drain(left..right);
-                                $cursor_pos = left;
-                                $seq.clear();
-                            },
-                            Some("c") | Some("cg") => {
-                                $input.drain(left..right);
-                                $cursor_pos = left;
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                                $seq.clear();
-                            },
-                            _ => { $seq.clear(); }
-                        }
-                    },
-                    KeyCode::Char('i') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('I') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $cursor_pos = line_start;
-                        $persis_y = 0;
-                        while $cursor_pos < line_end {
-                            if let Some(c) = $input.chars().nth($cursor_pos) {
-                                if !c.is_whitespace() || c == '\n' {
-                                    break;
-                                }
-                            }
-                            $cursor_pos += 1;
-                        }
-                        if $cursor_pos >= line_end {
-                            $cursor_pos = line_start;
-                        }
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('a') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        if $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') { $cursor_pos += 1; };
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('A') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $cursor_pos = line_end;
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('o') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $input.insert(line_end, '\n');
-                        $cursor_pos = line_end.saturating_add(1);
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('O') if $vim_mode == Vim::Normal => {
-                        $seq.clear();
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $cursor_pos = line_start;
-                        $persis_y = 0;
-                        while $cursor_pos < line_end {
-                            if let Some(c) = $input.chars().nth($cursor_pos) {
-                                if !c.is_whitespace() || c == '\n' {
-                                    break;
-                                }
-                            }
-                            $cursor_pos += 1;
-                        }
-                        if $cursor_pos >= line_end {
-                            $cursor_pos = line_start;
-                        }
-                        $input.insert(line_start, '\n');
-                        $cursor_pos = line_start;
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char('g') if $vim_mode == Vim::Normal => {
-                        match k {
-                            Some(s) if s.contains('g') => {
-                                let target_line = if n == 0 { 0 } else { n.saturating_sub(1) };
-                                let lines: Vec<&str> = $input.split('\n').collect();
-                                let target_line = target_line.min(lines.len().saturating_sub(1));
-
-                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                                $persis_y = $persis_y.max(current_col);
-                                $cursor_pos = lines.iter()
-                                    .take(target_line)
-                                    .map(|line| line.chars().count() + 1)
-                                    .sum::<usize>();
-
-                                let target_line_len = lines[target_line].chars().count();
-                                let target_col = $persis_y.min(target_line_len);
-                                $cursor_pos += target_col;
-                                $seq.clear();
-                            },
-                            _ => { $seq.push('g'); }
-                        }
-                    },
-                    KeyCode::Char('G') if $vim_mode == Vim::Normal => {
-                        let lines: Vec<&str> = $input.split('\n').collect();
-                        let target_line = lines.len().saturating_sub(1);
-
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                        $persis_y = $persis_y.max(current_col);
-                        $cursor_pos = lines.iter()
-                            .take(target_line)
-                            .map(|line| line.chars().count() + 1)
-                            .sum::<usize>();
-
-                        let target_line_len = lines[target_line].chars().count();
-                        let target_col = $persis_y.min(target_line_len);
-                        $cursor_pos += target_col;
-                        $seq.clear();
-                    },
-                    KeyCode::Char('S') if $vim_mode == Vim::Normal => {
-                        let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                        let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0);
-                        let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                        let line_end = chars_after.iter().position(|&c| c == '\n')
-                            .map(|pos| $cursor_pos + pos)
-                            .unwrap_or($input.len());
-
-                        $input.drain(line_start..line_end);
-                        $cursor_pos = line_start;
-                        $seq.clear();
-                    },
-                    KeyCode::Char('s') if $vim_mode == Vim::Normal => {
-                        if n==0 { n+=1 };
-                        while n>0 && $input.chars().nth($cursor_pos) != Some('\n') {
-                            if $cursor_pos < $input.len() {
-                                $input.remove($cursor_pos);
-                            }
-                            n = n.saturating_sub(1);
-                        }
-                        $seq.clear();
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
-                    KeyCode::Char(x) if $vim_mode == Vim::Normal && (x=='x' || x=='X') => {
-                        if n==0 { n+=1 };
-                        while n>0 {
-                            if x == 'X' && $input.chars().nth($cursor_pos.saturating_sub(1)) != Some('\n') {
-                                if $cursor_pos > 0 {
-                                    $cursor_pos = $cursor_pos.saturating_sub(1);
-                                    $input.remove($cursor_pos);
-                                    if ($cursor_pos == 0) { continue; }
-                                }
-                            } else if x == 'x' && $input.chars().nth($cursor_pos) != Some('\n') {
+                        },
+                        KeyCode::Delete => {
+                            if n==0 { n+=1 };
+                            while n>0 {
                                 if $cursor_pos < $input.len() {
                                     $input.remove($cursor_pos);
                                     if ($cursor_pos == $input.len()) {
                                         $cursor_pos = $cursor_pos.saturating_sub(1);
-                                        break;
                                     }
                                 }
+                                n = n.saturating_sub(1);
                             }
-                            n = n.saturating_sub(1);
-                        }
-                        $seq.clear();
-                    },
-                    KeyCode::Char('d') if $vim_mode == Vim::Normal => {
-                        match k {
-                            Some("d") => {
-                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                                    .map(|pos| pos + 1)
-                                    .unwrap_or(0);
-                                let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                                let line_end = chars_after.iter().position(|&c| c == '\n')
-                                    .map(|pos| $cursor_pos + pos)
-                                    .unwrap_or($input.len());
-                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
-                                let (delete_start, delete_end) = if line_start > 0 {
-                                    (line_start - 1, line_end)
-                                } else if line_end < $input.len() {
-                                    (line_start, line_end + 1)
-                                } else {
-                                    (line_start, line_end)
-                                };
-                                $input.drain(delete_start..delete_end);
+                            $seq.clear();
+                        },
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) && $vim_mode == Vim::Insert => { // NOTE: Specific to this app, allows new lines in messages
+                            $input.insert($cursor_pos, '\n');
+                            $cursor_pos += 1;
+                        },
+                        KeyCode::Enter => { // NOTE: Specific to this app (TODO: send the message & save to db)
+                            if n==0 { n = 1 };
+                            for _ in 0..n.min(10) {
+                                if !$input.is_empty() {
+                                    let sender_id = $chat.current_user.get_id();
+                                    let message = Message::new(-1, sender_id, $input.clone());
+                                    $chat.message_history.write().unwrap().push(message);
+                                }
+                            }
+                            $seq.clear();
+                            $input.clear();
+                            $cursor_pos = 0;
+                        },
 
-                                let chars_before_new: Vec<char> = $input.chars().take(delete_start).collect();
-                                let prev_line_start = chars_before_new.iter().rposition(|&c| c == '\n')
-                                    .map(|pos| pos + 1)
-                                    .unwrap_or(0);
-                                let prev_line_len = delete_start.saturating_sub(prev_line_start);
-                                $cursor_pos = prev_line_start + current_col.min(prev_line_len);
-                                if let Some(c) = $input.chars().nth($cursor_pos) {
-                                    if c == '\n' && $cursor_pos > prev_line_start {
+                        // NORMAL mode handling
+                        KeyCode::Char('0') if n==0 && $vim_mode == Vim::Normal => {
+                            let start = $cursor_pos;
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+
+                            $cursor_pos = line_start;
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain($cursor_pos..start);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain($cursor_pos..start);
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => {}
+                            }
+                        },
+                        KeyCode::Char(n) if n.is_ascii_digit() && $vim_mode == Vim::Normal => {
+                            $seq.push(n);
+                        }
+                        KeyCode::Esc if $vim_mode == Vim::Normal => { $seq.clear() },
+                        KeyCode::Char('h') if $vim_mode == Vim::Normal => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+
+                            $persis_y = 0;
+                            while n>0 && $cursor_pos > line_start {
+                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                                n = n.saturating_sub(1);
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain($cursor_pos..start);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain($cursor_pos..start);
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char('l') if $vim_mode == Vim::Normal => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $persis_y = 0;
+                            while n>0 && $cursor_pos < line_end.saturating_sub(1) {
+                                if $cursor_pos < $input.len().saturating_sub(1) {
+                                    $cursor_pos += 1;
+                                };
+                                n = n.saturating_sub(1);
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain(start..$cursor_pos);
+                                    $cursor_pos = start;
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain(start..$cursor_pos);
+                                    $cursor_pos = start;
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char('j') if $vim_mode == Vim::Normal => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+
+                            while n>0 {
+                                let lines: Vec<&str> = $input.split('\n').collect();
+                                let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+
+                                $persis_y = $persis_y.max(current_col);
+
+                                if newlines_before < lines.len() - 1 {
+                                    let current_line_len = lines[newlines_before].chars().count();
+                                    let next_line_len = lines[newlines_before + 1].chars().count();
+                                    let target_col = $persis_y.min(next_line_len);
+
+                                    $cursor_pos += (current_line_len - current_col) + 1 + target_col;
+                                }
+                                n = n.saturating_sub(1);
+                            }
+
+                            if let Some(c) = $input.chars().nth($cursor_pos) {
+                                if c == '\n' {
+                                    let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                    let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+
+                                    if $cursor_pos > line_start {
                                         $cursor_pos = $cursor_pos.saturating_sub(1);
                                     }
                                 }
+                            }
 
-                                $seq.clear();
-                            },
-                            Some("g") => { $seq.clear(); },
-                            Some("c") => { $seq.clear(); },
-                            _ => { $seq.push('d'); }
-                        }
-                    },
-                    KeyCode::Char('c') if $vim_mode == Vim::Normal => {
-                        match k {
-                            Some("c") => {
+                            match k {
+                                Some("d") => {
+                                    $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                    $cursor_pos = start.min($cursor_pos);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                    $cursor_pos = start.min($cursor_pos);
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char('k') if $vim_mode == Vim::Normal => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+
+                            while n>0 {
+                                let lines: Vec<&str> = $input.split('\n').collect();
                                 let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
-                                let line_start = chars_before.iter().rposition(|&c| c == '\n')
-                                    .map(|pos| pos + 1)
-                                    .unwrap_or(0);
-                                let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
-                                let line_end = chars_after.iter().position(|&c| c == '\n')
-                                    .map(|pos| $cursor_pos + pos)
-                                    .unwrap_or($input.len());
+                                let newlines_before = chars_before.iter().filter(|&&c| c == '\n').count();
+                                let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                                $persis_y = $persis_y.max(current_col);
 
-                                $input.drain(line_start..line_end);
-                                $cursor_pos = line_start;
-                                $seq.clear();
-                                $vim_mode = Vim::Insert;
-                                execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                            },
-                            Some("g") => { $seq.clear(); },
-                            Some("d") => { $seq.clear(); },
-                            _ => { $seq.push('c'); }
-                        }
-                    },
-                    KeyCode::Char('D') if $vim_mode == Vim::Normal => {
-                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') {
-                            $input.remove($cursor_pos);
-                        }
-                        if $input.chars().nth($cursor_pos.saturating_sub(1)) != Some('\n') {
-                            $cursor_pos = $cursor_pos.saturating_sub(1);
-                        }
-                    },
-                    KeyCode::Char('C') if $vim_mode == Vim::Normal => {
-                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') {
-                            $input.remove($cursor_pos);
-                        }
-                        $vim_mode = Vim::Insert;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBar);
-                    },
+                                if newlines_before > 0 {
+                                    let prev_line_len = lines[newlines_before - 1].chars().count();
+                                    let target_col = $persis_y.min(prev_line_len);
 
-                    // INSERT mode handling
-                    KeyCode::Backspace if $vim_mode == Vim::Insert => {
-                        if $cursor_pos > 0 {
-                            $cursor_pos -= 1;
-                            $input.remove($cursor_pos);
-                        }
-                    },
-                    KeyCode::Esc if $vim_mode == Vim::Insert => {
-                        if $cursor_pos > 0 {
-                            if let Some(prev_char) = $input.chars().nth($cursor_pos.saturating_sub(1)) {
-                                if prev_char != '\n' {
-                                    $cursor_pos = $cursor_pos.saturating_sub(1);
+                                    $cursor_pos = $cursor_pos.saturating_sub(current_col + 1 + (prev_line_len - target_col));
+                                }
+                                n = n.saturating_sub(1);
+                            }
+
+                            if let Some(c) = $input.chars().nth($cursor_pos) {
+                                if c == '\n' {
+                                    let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                    let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+
+                                    if $cursor_pos > line_start {
+                                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                                    }
                                 }
                             }
-                        }
-                        $vim_mode = Vim::Normal;
-                        execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-                    },
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Insert => {
-                        $input.insert($cursor_pos, '\n');
-                        $cursor_pos += 1;
-                    },
-                    KeyCode::Char(c) if $vim_mode == Vim::Insert => {
-                        $input.insert($cursor_pos, c);
-                        $cursor_pos += 1;
-                    },
-                    _ => {}
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                    $cursor_pos = start.min($cursor_pos);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain(start.min($cursor_pos)..start.max($cursor_pos));
+                                    $cursor_pos = start.min($cursor_pos);
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char('$') if $vim_mode == Vim::Normal => {
+                            let start = $cursor_pos;
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+
+                            if line_end > line_start {
+                                $cursor_pos = line_end.saturating_sub(1);
+                            } else {
+                                $cursor_pos = line_start;
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain(start..($cursor_pos + 1));
+                                    $cursor_pos = start.saturating_sub(1);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain(start..($cursor_pos + 1));
+                                    $cursor_pos = start;
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char(s) if $vim_mode == Vim::Normal && (s=='^' || s=='_') => {
+                            let start = $cursor_pos;
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $cursor_pos = line_start;
+                            $persis_y = 0;
+                            while $cursor_pos < line_end {
+                                if let Some(c) = $input.chars().nth($cursor_pos) {
+                                    if !c.is_whitespace() || c == '\n' {
+                                        break;
+                                    }
+                                }
+                                $cursor_pos += 1;
+                            }
+                            if $cursor_pos >= line_end {
+                                $cursor_pos = line_start;
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    let (left, right) = if start < $cursor_pos {
+                                        (start, $cursor_pos)
+                                    } else {
+                                        ($cursor_pos, start)
+                                    };
+                                    $input.drain(left..right);
+                                    $cursor_pos = left;
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    let (left, right) = if start < $cursor_pos {
+                                        (start, $cursor_pos)
+                                    } else {
+                                        ($cursor_pos, start)
+                                    };
+                                    $input.drain(left..right);
+                                    $cursor_pos = left;
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char(w) if $vim_mode == Vim::Normal && (w=='w' || w=='W') => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+
+                            while n>0 {
+                                while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                    $cursor_pos += 1;
+                                }
+                                while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                    $cursor_pos += 1;
+                                }
+                                $cursor_pos = $cursor_pos.min($input.len().saturating_sub(1));
+                                n = n.saturating_sub(1);
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain(start..$cursor_pos);
+                                    $cursor_pos = start;
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain(start..$cursor_pos);
+                                    $cursor_pos = start;
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char(b) if $vim_mode == Vim::Normal && (b=='b' || b=='B') => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+
+                            while n>0 {
+                                if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                    $cursor_pos -= 1;
+                                }
+                                while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                    $cursor_pos -= 1;
+                                }
+                                if $cursor_pos > 0 { $cursor_pos += 1; }
+                                n = n.saturating_sub(1);
+                            }
+
+                            match k {
+                                Some("d") => {
+                                    $input.drain($cursor_pos..start);
+                                    $seq.clear();
+                                },
+                                Some("c") => {
+                                    $input.drain($cursor_pos..start);
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char(e) if $vim_mode == Vim::Normal && (e=='e' || e=='E') => {
+                            if n==0 { n=1 };
+                            let start = $cursor_pos;
+
+                            while n>0 {
+                                match k {
+                                    Some("g") | Some("dg") | Some("cg") => {
+                                        if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                        while $cursor_pos > 0 && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                            $cursor_pos -= 1;
+                                        }
+                                        while $cursor_pos > 0 && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                            $cursor_pos -= 1;
+                                        }
+                                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                            $cursor_pos += 1;
+                                        }
+                                        if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                    },
+                                    _ => {
+                                        if $cursor_pos < $input.len() { $cursor_pos += 1; }
+                                        while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                            $cursor_pos += 1;
+                                        }
+                                        while $cursor_pos < $input.len() && !$input.chars().nth($cursor_pos).unwrap().is_whitespace() {
+                                            $cursor_pos += 1;
+                                        }
+                                        if $cursor_pos > 0 { $cursor_pos -= 1; }
+                                    }
+                                }
+                                n = n.saturating_sub(1);
+                            }
+
+                            let (left, right) = if start < $cursor_pos {
+                                (start, $cursor_pos + 1)
+                            } else {
+                                ($cursor_pos, start + 1)
+                            };
+
+                            match k {
+                                Some("d") | Some("dg") => {
+                                    $input.drain(left..right);
+                                    $cursor_pos = left;
+                                    $seq.clear();
+                                },
+                                Some("c") | Some("cg") => {
+                                    $input.drain(left..right);
+                                    $cursor_pos = left;
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                    $seq.clear();
+                                },
+                                _ => { $seq.clear(); }
+                            }
+                        },
+                        KeyCode::Char('i') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('I') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $cursor_pos = line_start;
+                            $persis_y = 0;
+                            while $cursor_pos < line_end {
+                                if let Some(c) = $input.chars().nth($cursor_pos) {
+                                    if !c.is_whitespace() || c == '\n' {
+                                        break;
+                                    }
+                                }
+                                $cursor_pos += 1;
+                            }
+                            if $cursor_pos >= line_end {
+                                $cursor_pos = line_start;
+                            }
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('a') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            if $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') { $cursor_pos += 1; };
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('A') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $cursor_pos = line_end;
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('o') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $input.insert(line_end, '\n');
+                            $cursor_pos = line_end.saturating_add(1);
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('O') if $vim_mode == Vim::Normal => {
+                            $seq.clear();
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $cursor_pos = line_start;
+                            $persis_y = 0;
+                            while $cursor_pos < line_end {
+                                if let Some(c) = $input.chars().nth($cursor_pos) {
+                                    if !c.is_whitespace() || c == '\n' {
+                                        break;
+                                    }
+                                }
+                                $cursor_pos += 1;
+                            }
+                            if $cursor_pos >= line_end {
+                                $cursor_pos = line_start;
+                            }
+                            $input.insert(line_start, '\n');
+                            $cursor_pos = line_start;
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char('g') if $vim_mode == Vim::Normal => {
+                            match k {
+                                Some(s) if s.contains('g') => {
+                                    let target_line = if n == 0 { 0 } else { n.saturating_sub(1) };
+                                    let lines: Vec<&str> = $input.split('\n').collect();
+                                    let target_line = target_line.min(lines.len().saturating_sub(1));
+
+                                    let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                    let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                                    $persis_y = $persis_y.max(current_col);
+                                    $cursor_pos = lines.iter()
+                                        .take(target_line)
+                                        .map(|line| line.chars().count() + 1)
+                                        .sum::<usize>();
+
+                                    let target_line_len = lines[target_line].chars().count();
+                                    let target_col = $persis_y.min(target_line_len);
+                                    $cursor_pos += target_col;
+                                    $seq.clear();
+                                },
+                                _ => { $seq.push('g'); }
+                            }
+                        },
+                        KeyCode::Char('G') if $vim_mode == Vim::Normal => {
+                            let lines: Vec<&str> = $input.split('\n').collect();
+                            let target_line = lines.len().saturating_sub(1);
+
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                            $persis_y = $persis_y.max(current_col);
+                            $cursor_pos = lines.iter()
+                                .take(target_line)
+                                .map(|line| line.chars().count() + 1)
+                                .sum::<usize>();
+
+                            let target_line_len = lines[target_line].chars().count();
+                            let target_col = $persis_y.min(target_line_len);
+                            $cursor_pos += target_col;
+                            $seq.clear();
+                        },
+                        KeyCode::Char('S') if $vim_mode == Vim::Normal => {
+                            let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                            let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                .map(|pos| pos + 1)
+                                .unwrap_or(0);
+                            let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                            let line_end = chars_after.iter().position(|&c| c == '\n')
+                                .map(|pos| $cursor_pos + pos)
+                                .unwrap_or($input.len());
+
+                            $input.drain(line_start..line_end);
+                            $cursor_pos = line_start;
+                            $seq.clear();
+                        },
+                        KeyCode::Char('s') if $vim_mode == Vim::Normal => {
+                            if n==0 { n+=1 };
+                            while n>0 && $input.chars().nth($cursor_pos) != Some('\n') {
+                                if $cursor_pos < $input.len() {
+                                    $input.remove($cursor_pos);
+                                }
+                                n = n.saturating_sub(1);
+                            }
+                            $seq.clear();
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+                        KeyCode::Char(x) if $vim_mode == Vim::Normal && (x=='x' || x=='X') => {
+                            if n==0 { n+=1 };
+                            while n>0 {
+                                if x == 'X' && $input.chars().nth($cursor_pos.saturating_sub(1)) != Some('\n') {
+                                    if $cursor_pos > 0 {
+                                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                                        $input.remove($cursor_pos);
+                                        if ($cursor_pos == 0) { continue; }
+                                    }
+                                } else if x == 'x' && $input.chars().nth($cursor_pos) != Some('\n') {
+                                    if $cursor_pos < $input.len() {
+                                        $input.remove($cursor_pos);
+                                        if ($cursor_pos == $input.len()) {
+                                            $cursor_pos = $cursor_pos.saturating_sub(1);
+                                            break;
+                                        }
+                                    }
+                                }
+                                n = n.saturating_sub(1);
+                            }
+                            $seq.clear();
+                        },
+                        KeyCode::Char('d') if $vim_mode == Vim::Normal => {
+                            match k {
+                                Some("d") => {
+                                    let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                    let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+                                    let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                                    let line_end = chars_after.iter().position(|&c| c == '\n')
+                                        .map(|pos| $cursor_pos + pos)
+                                        .unwrap_or($input.len());
+                                    let current_col = chars_before.iter().rev().take_while(|&&c| c != '\n').count();
+                                    let (delete_start, delete_end) = if line_start > 0 {
+                                        (line_start - 1, line_end)
+                                    } else if line_end < $input.len() {
+                                        (line_start, line_end + 1)
+                                    } else {
+                                        (line_start, line_end)
+                                    };
+                                    $input.drain(delete_start..delete_end);
+
+                                    let chars_before_new: Vec<char> = $input.chars().take(delete_start).collect();
+                                    let prev_line_start = chars_before_new.iter().rposition(|&c| c == '\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+                                    let prev_line_len = delete_start.saturating_sub(prev_line_start);
+                                    $cursor_pos = prev_line_start + current_col.min(prev_line_len);
+                                    if let Some(c) = $input.chars().nth($cursor_pos) {
+                                        if c == '\n' && $cursor_pos > prev_line_start {
+                                            $cursor_pos = $cursor_pos.saturating_sub(1);
+                                        }
+                                    }
+
+                                    $seq.clear();
+                                },
+                                Some("g") => { $seq.clear(); },
+                                Some("c") => { $seq.clear(); },
+                                _ => { $seq.push('d'); }
+                            }
+                        },
+                        KeyCode::Char('c') if $vim_mode == Vim::Normal => {
+                            match k {
+                                Some("c") => {
+                                    let chars_before: Vec<char> = $input.chars().take($cursor_pos).collect();
+                                    let line_start = chars_before.iter().rposition(|&c| c == '\n')
+                                        .map(|pos| pos + 1)
+                                        .unwrap_or(0);
+                                    let chars_after: Vec<char> = $input.chars().skip($cursor_pos).collect();
+                                    let line_end = chars_after.iter().position(|&c| c == '\n')
+                                        .map(|pos| $cursor_pos + pos)
+                                        .unwrap_or($input.len());
+
+                                    $input.drain(line_start..line_end);
+                                    $cursor_pos = line_start;
+                                    $seq.clear();
+                                    $vim_mode = Vim::Insert;
+                                    execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                                },
+                                Some("g") => { $seq.clear(); },
+                                Some("d") => { $seq.clear(); },
+                                _ => { $seq.push('c'); }
+                            }
+                        },
+                        KeyCode::Char('D') if $vim_mode == Vim::Normal => {
+                            while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') {
+                                $input.remove($cursor_pos);
+                            }
+                            if $input.chars().nth($cursor_pos.saturating_sub(1)) != Some('\n') {
+                                $cursor_pos = $cursor_pos.saturating_sub(1);
+                            }
+                        },
+                        KeyCode::Char('C') if $vim_mode == Vim::Normal => {
+                            while $cursor_pos < $input.len() && $input.chars().nth($cursor_pos) != Some('\n') {
+                                $input.remove($cursor_pos);
+                            }
+                            $vim_mode = Vim::Insert;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBar);
+                        },
+
+                        // INSERT mode handling
+                        KeyCode::Backspace if $vim_mode == Vim::Insert => {
+                            if $cursor_pos > 0 {
+                                $cursor_pos -= 1;
+                                $input.remove($cursor_pos);
+                            }
+                        },
+                        KeyCode::Esc if $vim_mode == Vim::Insert => {
+                            if $cursor_pos > 0 {
+                                if let Some(prev_char) = $input.chars().nth($cursor_pos.saturating_sub(1)) {
+                                    if prev_char != '\n' {
+                                        $cursor_pos = $cursor_pos.saturating_sub(1);
+                                    }
+                                }
+                            }
+                            $vim_mode = Vim::Normal;
+                            execute!(io::stdout(), SetCursorStyle::SteadyBlock);
+                        },
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Insert => {
+                            $input.insert($cursor_pos, '\n');
+                            $cursor_pos += 1;
+                        },
+                        KeyCode::Char(c) if $vim_mode == Vim::Insert => {
+                            $input.insert($cursor_pos, c);
+                            $cursor_pos += 1;
+                        },
+                        _ => {}
+                    }
                 }
             }
         }

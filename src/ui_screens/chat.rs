@@ -151,7 +151,7 @@ macro_rules! chat {
             f.render_widget(title, chunks[0]);
             f.render_widget(messages_widget, chunks[1]);
             f.render_widget(input_box, chunks[2]);
-            f.set_cursor_position((cursor_x, cursor_y)); //ERROR (bugs when newline after wrapping)
+            f.set_cursor_position((cursor_x, cursor_y)); //ERROR (bugs when newline after wrapping) (up/down don't navigate through wrapped lines)
         })?;
 
         // Handle input keys

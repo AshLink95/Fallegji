@@ -2,7 +2,7 @@ use std::{io, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     cursor::SetCursorStyle,
@@ -51,7 +51,7 @@ async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<
     *ran = false;
     Ok((conn, chat))
 }
-//TODO: startstuff new and old for noon-admin members
+//TODO: startstuff new and old for noon-admin members (same user in a new chat gets auto accepted)
 
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }
@@ -69,12 +69,12 @@ pub async fn app() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    execute!(
+    let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         )
-    )?;
+    );
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -103,22 +103,29 @@ pub async fn app() -> Result<()> {
     let mut input = String::new();
     let mut cursor_pos: usize = 0; // cursor position
     let mut persis_y: usize = 0;   // peristant y position
+    let mut anim_tick: usize = 0; // client animation tick
 
     let mut curr_screen = Screen::Home;
 
     #[allow(unused)] //macros are weird
+    #[allow(clippy::collapsible_match)] //TODO: refactor to match
     loop {
         if curr_screen == Screen::Home {
             home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, run_once);
         } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
             initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
-        } else if curr_screen == Screen::InitClient && let Some(ref chat) = chat
-            && let Some(ref conn) = conn {
-                initClient!(terminal, curr_screen, config);
+        } else if curr_screen == Screen::InitClient { //dbg
+        // } else if curr_screen == Screen::InitClient && let Some(ref chat) = chat
+        //     && let Some(ref conn) = conn {
+            initClient!(terminal, curr_screen, config, rendezvous_input, anim_tick);
         } else if curr_screen == Screen::Chat && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
-                chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
+            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
+        }
+        else {
+            curr_screen = Screen::Home;
+            //TODO: show error message (add error message variable which gets displayed in home!)
         }
     }
 

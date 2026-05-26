@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
 use anyhow::Result;
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, time::timeout};
 use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
 use crate::{auth::{Role, Uid, User}, connection::{KeyGen, Peer, Peermap}, db::Database};
@@ -95,13 +95,20 @@ impl Chat {
 
         let mut peers = HashMap::new();
         let mut peersmap = HashMap::new();
+        let mut connect_tasks = Vec::new();
         for peer in all_peers {
             if let Some(peer_user_id) = peer.get_user_id() {
                 peers.insert(peer_user_id, peer.clone());
                 let shared_key = peer.shrdkeygen(prvkey.clone());
-                let tcp_stream = TcpStream::connect(peer.get_addr()).await.ok();
-                peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
+                let addr = peer.get_addr();
+                connect_tasks.push((peer_user_id, peer, shared_key, tokio::spawn(async move {
+                    timeout(Duration::from_secs(1), TcpStream::connect(addr)).await.ok().and_then(|r| r.ok())
+                })));
             }
+        }
+        for (peer_user_id, peer, shared_key, task) in connect_tasks {
+            let tcp_stream = task.await.unwrap_or(None);
+            peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
         }
 
         let join_message = db.create_message(0, format!("{} joined the chat", user_name)).await?;

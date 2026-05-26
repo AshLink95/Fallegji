@@ -22,8 +22,10 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Macros (might be a stretch)
 
 # General checklist
+- [ ] send notifications
 - [ ] allow `\` commands in-text
 - [ ] allow sending files
+- [ ] allow sending videostream and soundstream (allowing for vc with cam by opening a browser)
 
 
 # Home Menu

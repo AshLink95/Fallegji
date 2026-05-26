@@ -77,7 +77,7 @@ pub struct ChatConfig {
     pub time_color: Option<(u8, u8, u8)>,
 }
 
-pub struct ChatChoice {
+pub struct ChatChoice { //TODO: need to include the username in that chat
     pub available: Vec<String>,
     pub choice: usize
 }
