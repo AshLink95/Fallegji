@@ -1,5 +1,6 @@
 // prompt engineered
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use fallegji::db::Database;
 use fallegji::auth::{Authentication, Role, User, Uid};
 use fallegji::messaging::Message;
@@ -8,10 +9,31 @@ use hex::ToHex;
 use anyhow::Result;
 use x25519_dalek::StaticSecret;
 
+static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TestDb {
+    pub path: String,
+    pub db: Database,
+}
+impl TestDb {
+    fn new() -> Result<Self> {
+        let id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = format!("test_{}.db", id);
+        let _ = std::fs::remove_file(&path); // clean up any previous run's leftover
+        let db = Database::new(&path)?;
+        Ok(Self { path, db })
+    }
+}
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[tokio::test]
 async fn test_create_read_user() -> Result<()> {
-    let db_path = "test.db";
-    let db: Database = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Create peer first (needed for user verification)
     let (peer, _) = db.create_peer(8080).await?;
@@ -37,8 +59,8 @@ async fn test_create_read_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_read_peer() -> Result<()> {
-    let db_path = "test.db";
-    let db: Database = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Create peer and associated user
     let (created, prv_key): (Peer, StaticSecret) = db.create_peer(6967).await?;
@@ -71,8 +93,8 @@ async fn test_create_read_peer() -> Result<()> {
 
 #[tokio::test]
 async fn test_create_read_message() -> Result<()> {
-    let db_path = "test.db";
-    let db: Database = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup user with linked peer (needed for read_user to work)
     let (peer, _) = db.create_peer(8080).await?;
@@ -100,8 +122,8 @@ async fn test_create_read_message() -> Result<()> {
 
 #[tokio::test]
 async fn test_update_user() -> Result<()> {
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup
     let (peer, _) = db.create_peer(8080).await?;
@@ -126,8 +148,8 @@ async fn test_update_user() -> Result<()> {
 
 #[tokio::test]
 async fn test_update_peer() -> Result<()> {
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup
     let (peer, _) = db.create_peer(7070).await?;
@@ -162,8 +184,8 @@ async fn test_update_peer() -> Result<()> {
 
 #[tokio::test]
 async fn test_update_message() -> Result<()> {
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup
     let (peer, _) = db.create_peer(8080).await?;
@@ -195,8 +217,8 @@ async fn test_update_message() -> Result<()> {
 
 #[tokio::test]
 async fn test_delete() -> Result<()> {
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup: Create user, peer, and message
     let (peer, _) = db.create_peer(8080).await?;
@@ -237,8 +259,8 @@ async fn test_delete() -> Result<()> {
 
 #[tokio::test]
 async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Setup: Create multiple users, peers, and messages
     let (peer1, _) = db.create_peer(8080).await?;
@@ -279,8 +301,8 @@ async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
 
 #[tokio::test]
 async fn test_save_all() -> Result<()> {
-    let db_path = "test.db";
-    let db = Database::new(db_path)?;
+    let t = TestDb::new()?;
+    let db = &t.db;
     
     // Start with peers - mix of DB and memory
     let (peer1, _) = db.create_peer(9000).await?; // In DB
@@ -302,20 +324,20 @@ async fn test_save_all() -> Result<()> {
     
     peer3.set_user_id(user2.get_name(), user2.get_id(), user2.get_uid())?;
     
-    // Save peers first (update peer1 with user_id, add peer3, delete peer2)
-    let peers_saved = db.save_all_peers(vec![peer1_linked.clone(), peer3.clone()]).await?;
-    assert_eq!(peers_saved, 2);
-    
-    // Save users (add user1 and user2, both new)
+    // Save users first (peers FK-reference users)
     let users_saved = db.save_all_users(vec![user1.clone(), user2.clone()]).await?;
     assert_eq!(users_saved, 2);
-    
+
+    // Save peers (update peer1 with user_id, add peer3, delete peer2)
+    let peers_saved = db.save_all_peers(vec![peer1_linked.clone(), peer3.clone()]).await?;
+    assert_eq!(peers_saved, 2);
+
     // Create messages - one in DB, two in memory
-    let _ = db.create_message(user1.get_id(), "In DB".to_string()).await?; // In DB (will be deleted)
-    let msg2 = Message::new(-1, user1.get_id(), "Memory 1".to_string()); // Memory (will be added)
-    let mut msg3 = Message::new(-2, user2.get_id(), "Memory 2".to_string()); // Memory (will be added)
+    let _ = db.create_message(user1.get_id(), "In DB".to_string()).await?;
+    let msg2 = Message::new(-1, user1.get_id(), "Memory 1".to_string());
+    let mut msg3 = Message::new(-2, user2.get_id(), "Memory 2".to_string());
     msg3.set_date(time::OffsetDateTime::now_utc().unix_timestamp() + 100);
-    
+
     // Save messages (add msg2 and msg3, delete msg1)
     let messages_saved = db.save_all_messages(vec![msg2.clone(), msg3.clone()]).await?;
     assert_eq!(messages_saved, 2);

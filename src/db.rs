@@ -607,24 +607,19 @@ impl Database {
             for user in &users {
                 let id_str = user.get_id().to_string();
                 if !existing_ids.contains(&id_str) {
-                    // Get pubkey for verification
+                    // Verify if peer pubkey available; skip bad data but not missing peers
                     let mut stmt_k = conn.prepare(
                         "SELECT pubkey FROM peers WHERE user_id = ?1"
                     )?;
-                    let key: String = match stmt_k.query_row(params![&id_str], |row| {
+                    if let Ok(key) = stmt_k.query_row(params![&id_str], |row| {
                         let pubkey_bytes: Vec<u8> = row.get(0)?;
                         Ok(hex::encode(pubkey_bytes))
                     }) {
-                        Ok(k) => k,
-                        Err(_) => continue, // Skip if no peer found
-                    };
-                    
-                    // Verify user before insert
-                    if !user.ver_id(key, user.get_id()) {
-                        continue; // Skip invalid users
+                        if !user.ver_id(key, user.get_id()) {
+                            continue; // Peer found but ID doesn't match — corrupted
+                        }
                     }
-                    
-                    // Insert new
+                    // No peer yet = trust ID computed at construction
                     conn.execute(
                         "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
                         params![

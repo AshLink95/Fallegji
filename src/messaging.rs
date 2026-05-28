@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
 use anyhow::Result;
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{net::TcpStream, sync::Mutex as TokioMutex, time::timeout};
 use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
 use crate::{auth::{Role, Uid, User}, connection::{KeyGen, Peer, Peermap}, db::Database};
@@ -107,7 +107,8 @@ impl Chat {
             }
         }
         for (peer_user_id, peer, shared_key, task) in connect_tasks {
-            let tcp_stream = task.await.unwrap_or(None);
+            let tcp_stream = task.await.unwrap_or(None)
+                .map(|s| Arc::new(TokioMutex::new(s)));
             peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
         }
 
