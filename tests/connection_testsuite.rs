@@ -348,6 +348,9 @@ async fn test_init_accept_peer() -> Result<()> {
     Ok(())
 }
 
+// 1 for listening, sending and receiving frames
+// 1 for new peer
 // 1 for communication messages,
 // 1 for comm heartbeat
 // 1 for comm typing
+// 1 for comm db sync

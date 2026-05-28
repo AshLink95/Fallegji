@@ -1,4 +1,5 @@
 // prompt engineered
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use fallegji::db::Database;
@@ -13,19 +14,21 @@ static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct TestDb {
     pub path: String,
-    pub db: Database,
+    pub db: ManuallyDrop<Database>,
 }
 impl TestDb {
     fn new() -> Result<Self> {
         let id = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path = format!("test_{}.db", id);
-        let _ = std::fs::remove_file(&path); // clean up any previous run's leftover
-        let db = Database::new(&path)?;
+        let _ = std::fs::remove_file(&path);
+        let db = ManuallyDrop::new(Database::new(&path)?);
         Ok(Self { path, db })
     }
 }
 impl Drop for TestDb {
     fn drop(&mut self) {
+        // Drop DB connection (releases file lock) before deleting the file
+        unsafe { ManuallyDrop::drop(&mut self.db); }
         let _ = std::fs::remove_file(&self.path);
     }
 }
