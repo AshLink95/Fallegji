@@ -12,10 +12,11 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $run_once: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident) => {
         // Validity checks
-        let chat_name_valid = !$chat_name_input.is_empty() &&
-            !$chats.available.contains(&$chat_name_input);
+        let combo_exists = !$chat_name_input.is_empty() && !$user_name_input.is_empty() &&
+            $chats.available.contains(&format!("{} @ {}", $user_name_input, $chat_name_input));
+        let chat_name_valid = !$chat_name_input.is_empty() && !combo_exists;
         let user_name_valid = !$user_name_input.is_empty();
         let rendezvous_valid = !$rendezvous_input.is_empty() &&
             $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
@@ -128,9 +129,21 @@ macro_rules! home {
             )
             .alignment(Alignment::Center)
             .style(Style::default().bg($config.bg_color));
+            let hop_color = if !$chat_2_delete.is_some_and(|chat| chat == $chats.choice) {
+                $config.my_color
+            } else {
+                $anim_tick = $anim_tick.wrapping_add(1);
+                if ($anim_tick/3) % 2 == 0 { $config.my_color } else {
+                    if !is_red {
+                        Color::Red
+                    } else {
+                        Color::Rgb(255, 100, 0)
+                    }
+                }
+            };
             let hop_line = Line::from(vec![
                 Span::styled("< ", Style::default().fg(arrow_color)),
-                Span::styled(current_chat, Style::default().fg($config.my_color)),
+                Span::styled(current_chat, Style::default().fg(hop_color)),
                 Span::styled(" >", Style::default().fg(arrow_color)),
             ]);
 
@@ -189,7 +202,13 @@ macro_rules! home {
             frame.render_widget(chat_name_paragraph, lines_layout[5]);
 
             // User name field
-            let user_name_color = $config.my_color;
+            let user_name_color = if !combo_exists {
+                $config.my_color
+            } else if !is_red {
+                Color::Red
+            } else {
+                Color::Rgb(255, 100, 0)
+            };
             let user_name_active = create_active && $active_field == 1;
             let user_name_label_color = if user_name_active { $config.text_color } else { $config.border_color };
 
@@ -354,12 +373,26 @@ macro_rules! home {
                                 $chats.choice = ($chats.choice + 1) % $chats.available.len();
                             }
                         }
+                        KeyCode::Char('X') | KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace if $active_section == 0 => {
+                            if $chat_2_delete.is_some_and(|chat| chat == $chats.choice) {
+                                $chat_2_delete = None;
+                                $conn = None;
+                                $chat = None;
+                                $chats.delete(CONFIG, SHARE);
+                            } else {
+                                $chat_2_delete = Some($chats.choice);
+                            }
+                        }
+                        KeyCode::Esc if $active_section == 0 => {
+                            $chat_2_delete = None;
+                        }
                         KeyCode::Enter if $active_section == 0 => {
                             if let Some(chosen) = $chats.available.get($chats.choice) {
                                 $config = Config::load(CONFIG, Some(chosen))?;
                                 $curr_screen = Screen::Chat;
-                                $choice = chosen.to_string();
+                                $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
                                 let cc = startstuffold(&$choice, &$config, &mut $run_once).await?;
+                                $chat_2_delete = None;
                                 $conn = Some(cc.0);
                                 $chat = Some(cc.1);
                             }

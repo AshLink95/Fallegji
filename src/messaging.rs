@@ -38,7 +38,7 @@ impl Message {
 
 impl Chat {
     pub async fn new(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, PublicKey, u64, i32, Peermap)> {
-        let db_path = format!("{}.db", chat_name);
+        let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
 
         let (peer, prvkey) = db.create_peer(port).await?;
@@ -76,7 +76,7 @@ impl Chat {
     }
 
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {
-        let db_path = format!("{}.db", chat_name);
+        let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
         let message_history = db.load_all_messages().await?;
         let all_users = db.load_all_users().await?;

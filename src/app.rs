@@ -24,7 +24,7 @@ use crate::config::Config;
 use x25519_dalek::{PublicKey, StaticSecret};
 // use tokio_util::sync::CancellationToken;
 
-// initiation functions
+// admin initialization functions
 async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, ran: &mut bool) -> Result<(Connection, Chat, StaticSecret, PublicKey, u64, i32)> {
     if !*ran {
         return Err(anyhow::anyhow!("startstuffnew already ran"));
@@ -51,6 +51,7 @@ async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<
     *ran = false;
     Ok((conn, chat))
 }
+
 //TODO: startstuff new and old for noon-admin members (same user in a new chat gets auto accepted)
 
 // Seqeuence parsing regex
@@ -59,8 +60,10 @@ lazy_static::lazy_static! {
     static ref RE_CHR: Regex = Regex::new(r"[a-zA-Z]+").unwrap();
 }
 pub async fn app() -> Result<()> {
-    // Config file (TODO: change to `~/.fallgejirc` in prod)
+    // Config file (TODO: change to `~/.fallgejirc` for linux in prod)
+    // share dir (TODO: change to `~/.local/share/fallgeji` for linux in prod)
     static CONFIG: &str = "fallegji.toml";
+    static SHARE: &str = ".";
     let mut chats = ChatChoice::load(CONFIG)?;
     let mut config = Config::load(CONFIG, None)?;
     let mut choice = String::from("");
@@ -84,6 +87,7 @@ pub async fn app() -> Result<()> {
     let mut chat_name_input = String::new();
     let mut user_name_input = String::new();
     let mut rendezvous_input = String::new();
+    let mut chat_2_delete: Option<usize> = None;
 
     // App meat: Connection and Chat
     let mut conn: Option<Connection> = None;
@@ -111,7 +115,7 @@ pub async fn app() -> Result<()> {
     #[allow(clippy::collapsible_match)] //TODO: refactor to match
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, run_once);
+            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once);
         } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
             initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);

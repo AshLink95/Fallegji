@@ -1,9 +1,8 @@
 // partially prompt engineered
 use ratatui::{widgets::BorderType, style::Color};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::{Path, PathBuf}};
 use std::fs;
-use std::path::Path;
 use std::net::SocketAddr;
 use x25519_dalek::{PublicKey, StaticSecret};
 use anyhow::Result;
@@ -14,40 +13,40 @@ pub struct TomlConfig {
     // Sectionless cosmetic configs
     #[serde(default = "default_border_style")]
     pub border_style: String,
-    
+
     #[serde(default = "default_max_height")]
     pub max_height: u16,
-    
+
     #[serde(default)]
     pub bg_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub text_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub border_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub normal_mode: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub insert_mode: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub users_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub my_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub system_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub online_color: Option<(u8, u8, u8)>,
-    
+
     #[serde(default)]
     pub time_color: Option<(u8, u8, u8)>,
-    
+
     // Chat-specific sections
     #[serde(flatten)]
     pub chats: HashMap<String, ChatConfig>,
@@ -61,7 +60,7 @@ pub struct ChatConfig {
     pub rendezvous: Option<SocketAddr>,
     pub pubkey: Option<String>,
     pub prvkey: Option<String>,
-    
+
     // Optional overrides for cosmetic configs
     pub border_style: Option<String>,
     pub max_height: Option<u16>,
@@ -114,18 +113,36 @@ impl ChatChoice {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let toml_config: TomlConfig = toml::from_str(&content)?;
-        
+
         let mut available: Vec<String> = toml_config.chats.keys().cloned().collect();
         available.sort(); // Optional: keep alphabetically sorted
-        
+
         Ok(Self {
             available,
             choice: 0,
         })
     }
-    
+
     pub fn current(&self) -> Option<&str> {
         self.available.get(self.choice).map(|s| s.as_str())
+    }
+
+    pub fn delete<P: AsRef<Path>>(&mut self, toml_path: P, db_dir: P) -> Result<()> {
+        if let Some(choice) = self.available.get(self.choice).map(|s| s.as_str()) {
+            let content = fs::read_to_string(&toml_path)?;
+            let mut toml_config = toml::from_str::<TomlConfig>(&content)?;
+            if let Some(removed) = toml_config.chats.remove(choice) {
+                let chat_name = choice.split(" @ ").last().unwrap_or(choice);
+                let user_name = removed.user_name.as_deref().unwrap_or(chat_name);
+                let mut db_path = PathBuf::from(db_dir.as_ref()).join(format!("{}__{}", user_name, chat_name));
+                db_path.set_extension("db");
+                let _ = fs::remove_file(&db_path);
+                fs::write(&toml_path, toml::to_string_pretty(&toml_config)?)?;
+                self.available.remove(self.choice);
+                self.choice = self.choice.min(self.available.len().saturating_sub(1));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -169,14 +186,14 @@ impl Config {
             time_color: Color::DarkGray,
         }
     }
-    
+
     fn from_toml(toml: TomlConfig, chat_name: Option<&str>) -> Self {
         // Get chat-specific config if available
         let chat_config = chat_name.and_then(|name| toml.chats.get(name));
-        
+
         // Helper to get value with fallback priority: chat-specific > global > default
-        let get_color = |chat_val: Option<Option<(u8, u8, u8)>>, 
-                         global_val: Option<(u8, u8, u8)>, 
+        let get_color = |chat_val: Option<Option<(u8, u8, u8)>>,
+                         global_val: Option<(u8, u8, u8)>,
                          default: Color| -> Color {
             chat_val
                 .flatten()
@@ -184,15 +201,15 @@ impl Config {
                 .map(|(r, g, b)| Color::Rgb(r, g, b))
                 .unwrap_or(default)
         };
-        
+
         let border_style_str = chat_config
             .and_then(|c| c.border_style.as_ref())
             .unwrap_or(&toml.border_style);
-        
+
         let max_height = chat_config
             .and_then(|c| c.max_height)
             .unwrap_or(toml.max_height);
-        
+
         let pubkey = chat_config
             .and_then(|c| c.pubkey.as_ref())
             .and_then(|s| decode(s).ok())
@@ -200,7 +217,7 @@ impl Config {
                 let arr: [u8; 32] = bytes.try_into().ok()?;
                 Some(PublicKey::from(arr))
             });
-        
+
         let prvkey = chat_config
             .and_then(|c| c.prvkey.as_ref())
             .and_then(|s| decode(s).ok())
@@ -208,7 +225,7 @@ impl Config {
                 let arr: [u8; 32] = bytes.try_into().ok()?;
                 Some(StaticSecret::from(arr))
             });
-        
+
         Self {
             user_id: chat_config.and_then(|c| c.user_id),
             user_name: chat_config.and_then(|c| c.user_name.clone()),
@@ -216,10 +233,10 @@ impl Config {
             rendezvous: chat_config.and_then(|c| c.rendezvous),
             pubkey,
             prvkey,
-            
+
             border_style: parse_border_style(border_style_str),
             max_height,
-            
+
             bg_color: get_color(
                 chat_config.map(|c| c.bg_color),
                 toml.bg_color,
@@ -272,7 +289,7 @@ impl Config {
             ),
         }
     }
-    
+
     #[allow(clippy::too_many_arguments)]
     pub fn save<P: AsRef<Path>>(path: P, chat_name: &str, user_name: &str, rendezvous: &str, user_id: u64, peer_id: i32, pubkey: PublicKey, prvkey: StaticSecret) -> Result<Self> {
         // Load existing config or create new
@@ -311,9 +328,11 @@ impl Config {
             }
         };
 
+        let display_key = format!("{} @ {}", user_name, chat_name);
+
         // Check if chat already exists
-        if toml_config.chats.contains_key(chat_name) {
-            return Err(anyhow::anyhow!("Chat '{}' already exists", chat_name));
+        if toml_config.chats.contains_key(&display_key) {
+            return Err(anyhow::anyhow!("Chat '{}' already exists", display_key));
         }
 
         // Update chat-specific config
@@ -337,7 +356,7 @@ impl Config {
             online_color: None,
             time_color: None,
         };
-        toml_config.chats.insert(chat_name.to_string(), chat_config);
+        toml_config.chats.insert(display_key, chat_config);
 
         let toml_string = toml::to_string_pretty(&toml_config)?;
         fs::write(path, toml_string)?;
