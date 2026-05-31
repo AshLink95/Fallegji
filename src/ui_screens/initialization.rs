@@ -105,7 +105,7 @@ macro_rules! initServer {
                     )
                     .split(requests_inner);
 
-                for (idx, (addr, name)) in requests_guard.iter().enumerate() {
+                for (idx, (addr, name, _pubkey)) in requests_guard.iter().enumerate() {
                     let row_active = requests_active && $active_col == idx as i32;
 
                     let button_layout = Layout::default()

@@ -350,6 +350,33 @@ async fn test_save_all() -> Result<()> {
     assert!(loaded_messages.iter().any(|m| m.get_contents() == "Memory 1"));
     assert!(loaded_messages.iter().any(|m| m.get_contents() == "Memory 2"));
     assert!(!loaded_messages.iter().any(|m| m.get_contents() == "In DB"));
-    
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_dump_load() -> Result<()> {
+    // Populate a source DB.
+    let src = TestDb::new()?;
+    let (peer, _) = src.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = src.db.create_user(pubkey_hex, "alice".to_string(), Uid::getuid()).await?;
+    src.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let _ = src.db.create_message(user.get_id(), "hello".to_string()).await?;
+
+    // Dump → non-empty raw sqlite bytes.
+    let bytes = src.db.dump().await?;
+    assert!(!bytes.is_empty());
+
+    // Load into a fresh DB → all data carried over.
+    let dst = TestDb::new()?;
+    dst.db.load(bytes).await?;
+
+    let users = dst.db.load_all_users().await?;
+    assert!(users.iter().any(|u| u.get_name() == "alice"), "user survived dump/load");
+    let peers = dst.db.load_all_peers().await?;
+    assert!(peers.iter().any(|p| p.get_addr().port() == 9000), "peer survived dump/load");
+    let msgs = dst.db.load_all_messages().await?;
+    assert!(msgs.iter().any(|m| m.get_contents() == "hello"), "message survived dump/load");
     Ok(())
 }

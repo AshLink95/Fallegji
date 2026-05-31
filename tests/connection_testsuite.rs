@@ -1,6 +1,6 @@
 // prompt engineered
 use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::{TcpListener, TcpStream}, sync::Mutex, io::AsyncReadExt};
 
 async fn free_rendezvous_addr() -> SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -10,11 +10,55 @@ async fn free_rendezvous_addr() -> SocketAddr {
 }
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, get_free_port}, messaging::Message, auth::{Uid, User}};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port}, messaging::{Message, Chat}, auth::{Uid, User}, db::Database};
 use hex::ToHex;
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
 use anyhow::Result;
+
+// Header bytes (mirror connection.rs private consts)
+const HBT_HD: u8 = 0xE2;
+const TYP_HD: u8 = 0xD3;
+
+/// Build a Connection holding one peer wired to a live TCP stream.
+/// Returns (conn, the other end of that stream, the shared key).
+async fn conn_with_peer() -> Result<(Connection, TcpStream, Key)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let laddr = listener.local_addr()?;
+    let client = TcpStream::connect(laddr).await?;
+    let (server, _) = listener.accept().await?;
+
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let (peer, _) = Peer::new_out(1, 9000)?;
+    let mut peermap = HashMap::new();
+    peermap.insert(1u64, (peer, key, Some(Arc::new(Mutex::new(client)))));
+
+    let (_, prvkey) = Peer::keypairgen()?;
+    let rendez = free_rendezvous_addr().await;
+    let sock = get_free_port().await?;
+    let conn = Connection::new(prvkey, rendez, sock, peermap).await;
+    Ok((conn, server, key))
+}
+
+/// Read one length-prefixed frame.
+async fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len).await?;
+    let n = u32::from_be_bytes(len) as usize;
+    let mut frame = vec![0u8; n];
+    stream.read_exact(&mut frame).await?;
+    Ok(frame)
+}
+
+/// Minimal in-memory Chat for testing read_* dispatch.
+fn test_chat() -> Result<Chat> {
+    Ok(Chat {
+        message_history: Arc::new(std::sync::RwLock::new(Vec::new())),
+        members: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
+        db: Database::new(":memory:")?,
+    })
+}
 
 #[test]
 fn test_peer_new_out_creation() {
@@ -35,28 +79,36 @@ fn test_peer_new_in_creation() {
     let peer_id = 2;
     let peer_name = "TestPeer".to_string();
     let peer_uid = Uid::from(10);
-    let peer_user_id = 12345u64;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
     let tmp_secret = StaticSecret::from([1u8; 32]);
     let pubkey = PublicKey::from(&tmp_secret);
     let last_heartbeat = Some(1234567890i64);
+    let last_seen_typing = Some(1111111111i64);
 
-    let result = Peer::new_in(
+    // Real user_id so ver_id passes and new_in succeeds.
+    let pubkey_hex: String = pubkey.as_bytes().encode_hex();
+    let peer_user_id = User::new(pubkey_hex, peer_name.clone(), peer_uid).get_id();
+
+    let peer = Peer::new_in(
         peer_id,
         peer_name,
         peer_uid,
         peer_user_id,
         addr,
         pubkey,
-        last_heartbeat
-    );
+        last_seen_typing,
+        last_heartbeat,
+    ).expect("new_in should succeed with a valid user_id");
 
-    if let Ok(peer) = result {
-        assert_eq!(peer.get_id(), peer_id);
-        assert_eq!(peer.get_user_id(), None);
-        assert_eq!(peer.get_addr(), addr);
-        assert_eq!(peer.get_last_heartbeat(), last_heartbeat);
-    }
+    assert_eq!(peer.get_id(), peer_id);
+    assert_eq!(peer.get_user_id(), Some(peer_user_id));
+    assert_eq!(peer.get_addr(), addr);
+    assert_eq!(peer.get_last_heartbeat(), last_heartbeat);
+    assert_eq!(peer.get_last_seen_typing(), last_seen_typing);
+
+    // Invalid user_id is rejected.
+    let bad = Peer::new_in(peer_id, "x".to_string(), peer_uid, 999u64, addr, pubkey, None, None);
+    assert!(bad.is_err());
 }
 
 #[test]
@@ -67,6 +119,7 @@ fn test_peer_getters() {
     assert_eq!(peer.get_user_id(), None);
     assert_eq!(peer.get_addr().port(), 8080);
     assert_eq!(peer.get_last_heartbeat(), None);
+    assert_eq!(peer.get_last_seen_typing(), None);
 
     let pubkey = peer.get_pubkey();
     assert_eq!(pubkey.as_bytes().len(), 32);
@@ -91,6 +144,12 @@ fn test_peer_setters() {
 
     peer.set_last_heartbeat(None);
     assert_eq!(peer.get_last_heartbeat(), None);
+
+    peer.set_last_seen_typing(Some(42));
+    assert_eq!(peer.get_last_seen_typing(), Some(42));
+
+    peer.set_last_seen_typing(None);
+    assert_eq!(peer.get_last_seen_typing(), None);
 
     let user_name = "TestUser".to_string();
     let user_id = 999u64;
@@ -126,49 +185,83 @@ fn test_keygen() {
     assert_eq!(shared1.as_slice().len(), 32);
 }
 
+// Header bytes (mirror connection.rs private consts)
+const MSG_HD: u8 = 0xF1;
+const DBS_HD: u8 = 0xC4;
+
 #[test]
 fn test_secrecy() {
-    // Arrange
     let key_bytes: &[u8; 32] = b"super-secret-32-byte-key!!-12345";
     let key = Key::from_slice(key_bytes);
     let wrong_key = Key::from_slice(b"wrong-key-does-not-match-1234567");
 
-    // Test cases using Message::new() with private fields
+    // --- encode/decode: Message roundtrips (uncompressed path) ---
     let test_messages = [
         Message::new(1, 12345, "Hello peer-to-peer world!".to_string()),
         Message::new(2, 0, "".to_string()),
         Message::new(3, 999, "🔥 Complex chars: emojis & unicode 🔥".to_string()),
     ];
 
-    // Act & Assert: Roundtrip all messages
-    for original_msg in test_messages.iter() {
-        // Encode
-        let encrypted = Connection::encode(key, original_msg.clone()).expect("Encode failed");
+    for original in test_messages.iter() {
+        let encrypted = Connection::encode(key, MSG_HD, original.clone()).expect("Encode failed");
+        // 1B header + plaintext + 12B nonce + 16B tag
+        let plaintext_len = serde_json::to_vec(original).unwrap().len();
+        assert_eq!(encrypted.len(), 1 + plaintext_len + 12 + 16);
 
-        // Structure checks using getters
-        assert!(encrypted.len() >= 12 + 16, "Too short: {}", encrypted.len());
-        let plaintext_len = serde_json::to_vec(&original_msg).unwrap().len();
-        assert_eq!(encrypted.len(), plaintext_len + 12 + 16,
-                  "Size mismatch: expected {} got {}",
-                  plaintext_len + 12 + 16, encrypted.len());
-
-        // Decode
-        let decrypted = Connection::decode(key, &encrypted).expect("Decode failed");
-
-        // Perfect roundtrip using getters
-        assert_eq!(original_msg.get_id(), decrypted.get_id(), "ID mismatch");
-        assert_eq!(original_msg.get_sender_id(), decrypted.get_sender_id(), "Sender mismatch");
-        assert_eq!(original_msg.get_contents(), decrypted.get_contents(), "Contents mismatch");
-        assert_eq!(original_msg.get_sent_at(), decrypted.get_sent_at(), "Timestamp mismatch");
+        let (header, bytes) = Connection::decode(key, &encrypted).expect("Decode failed");
+        assert_eq!(header, MSG_HD);
+        let decrypted: Message = serde_json::from_slice(&bytes).expect("Deserialize failed");
+        assert_eq!(original.get_id(), decrypted.get_id());
+        assert_eq!(original.get_sender_id(), decrypted.get_sender_id());
+        assert_eq!(original.get_contents(), decrypted.get_contents());
+        assert_eq!(original.get_sent_at(), decrypted.get_sent_at());
     }
 
-    // Security tests: Wrong key (1) and Invalid data (2 & 3) fail
+    // --- encode/decode: String roundtrips ---
+    let test_strings = [
+        "hello world".to_string(),
+        "".to_string(),
+        "🔥 unicode test 🔥".to_string(),
+    ];
+
+    for original in test_strings.iter() {
+        let encrypted = Connection::encode(key, MSG_HD, original.clone()).expect("Encode failed");
+        let (header, bytes) = Connection::decode(key, &encrypted).expect("Decode failed");
+        assert_eq!(header, MSG_HD);
+        let decrypted: String = serde_json::from_slice(&bytes).expect("Deserialize failed");
+        assert_eq!(original, &decrypted);
+    }
+
+    // --- enzip/decode: DB-sync path. listen always decodes; DBS_HD body is decompressed. ---
+    let test_messages = [
+        Message::new(1, 12345, "Hello peer-to-peer world!".to_string()),
+        Message::new(2, 0, "".to_string()),
+        Message::new(3, 999, "🔥 Complex chars: emojis & unicode 🔥".to_string()),
+    ];
+
+    for original in test_messages.iter() {
+        // DBS_HD → encode compresses, decode decompresses, transparently
+        let zipped = Connection::encode(key, DBS_HD, original.clone()).expect("Encode failed");
+        let (header, body) = Connection::decode(key, &zipped).expect("Decode failed");
+        assert_eq!(header, DBS_HD);
+        let decrypted: Message = serde_json::from_slice(&body).expect("Deserialize failed");
+        assert_eq!(original.get_id(), decrypted.get_id());
+        assert_eq!(original.get_contents(), decrypted.get_contents());
+    }
+
+    // DBS_HD (compressed) smaller than MSG_HD (raw) for compressible data
+    let repetitive = "aaaa".repeat(1000);
+    let raw_len = Connection::encode(key, MSG_HD, repetitive.clone()).unwrap().len();
+    let zip_len = Connection::encode(key, DBS_HD, repetitive).unwrap().len();
+    assert!(zip_len < raw_len);
+
+    // --- Security: wrong key, empty, too short all fail at decode ---
     let mut msg = Message::new(999, 999, "tamper test".to_string());
-    msg.set_contents("security test".to_string());  // Using setter
-    let encrypted = Connection::encode(key, msg).unwrap();
-    assert!(Connection::decode(wrong_key, &encrypted).is_err(), "Wrong key should fail");
-    assert!(Connection::decode(key, &[]).is_err(), "Empty data should fail");
-    assert!(Connection::decode(key, &encrypted[..11]).is_err(), "Too short should fail");
+    msg.set_contents("security test".to_string());
+    let encrypted = Connection::encode(key, MSG_HD, msg).unwrap();
+    assert!(Connection::decode(wrong_key, &encrypted).is_err());
+    assert!(Connection::decode(key, &[]).is_err());
+    assert!(Connection::decode(key, &encrypted[..11]).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -307,50 +400,200 @@ async fn test_fallback() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_init_accept_peer() -> Result<()> {
-    let rendezvous_addr = free_rendezvous_addr().await;
+async fn bare_conn() -> Result<Connection> {
+    let (_, prvkey) = Peer::keypairgen()?;
+    Ok(Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, HashMap::new()).await)
+}
 
-    let (admin_pub, admin_prv) = Peer::keypairgen()?;
-    let (new_pub,   new_prv)   = Peer::keypairgen()?;
+// --- send path: each broadcast emits a valid, decryptable frame with the right header ---
 
-    let admin_uid = Uid::from(1u32);
-    let new_uid   = Uid::from(2u32);
-    let admin_pubkey_hex: String = admin_pub.as_bytes().encode_hex();
-    let new_pubkey_hex:   String = new_pub.as_bytes().encode_hex();
-    let admin_user_id = User::new(admin_pubkey_hex, "Admin".to_string(),   admin_uid).get_id();
-    let new_user_id   = User::new(new_pubkey_hex,   "NewPeer".to_string(), new_uid).get_id();
+#[tokio::test]
+async fn test_send_msg_frame() -> Result<()> {
+    let (conn, mut server, key) = conn_with_peer().await?;
+    conn.send_msg(Message::new(1, 42, "hello".to_string())).await?;
 
-    let sock_admin = get_free_port().await?;
-    let sock_new   = get_free_port().await?;
-    let new_addr   = sock_new.0;
-
-    let mut conn_admin = Connection::new(admin_prv, rendezvous_addr, sock_admin, HashMap::new()).await;
-    let mut conn_new   = Connection::new(new_prv,   rendezvous_addr, sock_new,   HashMap::new()).await;
-
-    conn_admin.set_user(admin_user_id, "Admin".to_string(),   admin_uid);
-    conn_new.set_user(new_user_id,     "NewPeer".to_string(), new_uid);
-
-    // New peer listens for one inbound (accept_one drives socket.1)
-    let accept_handle = tokio::spawn(async move {
-        conn_new.accept_one().await
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Admin accepts the request and connects to new peer
-    let mut requests = vec![(new_addr, "NewPeer".to_string())];
-    conn_admin.init_peer(&mut requests, 0).await?;
-    assert!(requests.is_empty(), "init_peer should remove the request on success");
-
-    accept_handle.await??;
-
+    let frame = read_frame(&mut server).await?;
+    let (header, payload) = Connection::decode(&key, &frame)?;
+    assert_eq!(header, MSG_HD);
+    let got: Message = serde_json::from_slice(&payload)?;
+    assert_eq!(got.get_contents(), "hello");
+    assert_eq!(got.get_sender_id(), 42);
     Ok(())
 }
 
-// 1 for listening, sending and receiving frames
-// 1 for new peer
-// 1 for communication messages,
-// 1 for comm heartbeat
-// 1 for comm typing
-// 1 for comm db sync
+#[tokio::test]
+async fn test_send_heartbeat_frame() -> Result<()> {
+    let (conn, mut server, key) = conn_with_peer().await?;
+    conn.send_heartbeat().await?;
+
+    let frame = read_frame(&mut server).await?;
+    let (header, _payload) = Connection::decode(&key, &frame)?;
+    assert_eq!(header, HBT_HD);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_send_typing_frame() -> Result<()> {
+    let (conn, mut server, key) = conn_with_peer().await?;
+    conn.send_typing().await?;
+
+    let frame = read_frame(&mut server).await?;
+    let (header, _payload) = Connection::decode(&key, &frame)?;
+    assert_eq!(header, TYP_HD);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_send_db_sync_frame() -> Result<()> {
+    let (conn, mut server, key) = conn_with_peer().await?;
+    let db = Database::new(":memory:")?;
+    conn.send_db_sync(&db).await?;
+
+    let frame = read_frame(&mut server).await?;
+    let (header, payload) = Connection::decode(&key, &frame)?;
+    assert_eq!(header, DBS_HD);
+    // payload is the serialized raw sqlite snapshot — non-empty.
+    let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
+    assert!(!bytes.is_empty());
+    Ok(())
+}
+
+// --- read path: dispatched reads mutate the shared Chat ---
+
+#[tokio::test]
+async fn test_read_msg_appends_history() -> Result<()> {
+    let chat = test_chat()?;
+    // Sender must exist as a user (create_message joins users).
+    let (peer, _) = chat.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let sender = chat.db.create_user(pubkey_hex, "sender".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(peer.get_id(), sender.get_id()).await?;
+
+    let conn = bare_conn().await?;
+    let payload = serde_json::to_vec(&Message::new(7, sender.get_id(), "incoming".to_string()))?;
+
+    conn.read_msg(&chat, payload).await?;
+
+    // In-memory history updated synchronously.
+    {
+        let hist = chat.message_history.read().unwrap();
+        assert!(hist.iter().any(|m| m.get_contents() == "incoming"));
+    }
+    // DB persist is spawned off the hot path — give it a moment, then verify.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stored = chat.db.load_all_messages().await?;
+    assert!(stored.iter().any(|m| m.get_contents() == "incoming"), "message persisted to db");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_db_sync_adopts_superset() -> Result<()> {
+    // Build a source DB with a user + message; its snapshot is the superset.
+    let src = Database::new(":memory:")?;
+    let (peer, _) = src.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = src.create_user(pubkey_hex, "alice".to_string(), Uid::getuid()).await?;
+    src.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let _ = src.create_message(user.get_id(), "synced".to_string()).await?;
+    let snapshot = src.dump().await?;
+
+    // Empty local chat → trivially a subset → snapshot is adopted.
+    let chat = test_chat()?;
+    let conn = bare_conn().await?;
+    let payload = serde_json::to_vec(&snapshot)?;
+
+    conn.read_db_sync(&chat, payload).await?;
+
+    {
+        let hist = chat.message_history.read().unwrap();
+        assert!(hist.iter().any(|m| m.get_contents() == "synced"), "message adopted (memory)");
+        let members = chat.members.read().unwrap();
+        assert!(members.values().any(|u| u.get_name() == "alice"), "user adopted (memory)");
+    }
+    // DB adopted the snapshot too.
+    let db_msgs = chat.db.load_all_messages().await?;
+    assert!(db_msgs.iter().any(|m| m.get_contents() == "synced"), "message persisted to db");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_db_sync_rejects_conflict() -> Result<()> {
+    // Snapshot lacks a message the local DB has → conflict → no adoption.
+    let snapshot = Database::new(":memory:")?.dump().await?; // empty snapshot
+
+    let chat = test_chat()?;
+    let (peer, _) = chat.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = chat.db.create_user(pubkey_hex, "bob".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let _ = chat.db.create_message(user.get_id(), "local only".to_string()).await?;
+
+    let conn = bare_conn().await?;
+    let payload = serde_json::to_vec(&snapshot)?;
+    conn.read_db_sync(&chat, payload).await?;
+
+    // Local message must survive (snapshot was missing it).
+    let msgs = chat.db.load_all_messages().await?;
+    assert!(msgs.iter().any(|m| m.get_contents() == "local only"), "conflict must not clobber local data");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_newpeer_adopts_db() -> Result<()> {
+    // Admin's snapshot the newcomer receives via NWP.
+    let src = Database::new(":memory:")?;
+    let (peer, _) = src.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = src.create_user(pubkey_hex, "admin".to_string(), Uid::getuid()).await?;
+    src.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let snapshot = src.dump().await?;
+
+    let chat = test_chat()?;
+    let mut conn = bare_conn().await?;
+    conn.set_user(1, "me".to_string(), Uid::from(1)); // needed to register self
+    let payload = serde_json::to_vec(&snapshot)?;
+
+    conn.read_newpeer(&chat, payload).await?;
+
+    let users = chat.db.load_all_users().await?;
+    assert!(users.iter().any(|u| u.get_name() == "admin"), "newcomer adopts admin's DB");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_peer() -> Result<()> {
+    let (conn, _server, _key) = conn_with_peer().await?;
+    // conn_with_peer keys the peer under user_id 1.
+    assert!(conn.get_peer(&1).is_some(), "known peer returned");
+    assert!(conn.get_peer(&999).is_none(), "unknown peer is None");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_heartbeat_updates_and_persists() -> Result<()> {
+    let chat = test_chat()?;
+    // Peer must exist in the db (with a linked user) so read_peer can read it back.
+    let (peer, _) = chat.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = chat.db.create_user(pubkey_hex, "p".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+
+    // Wire that peer into the connection peermap, keyed by user_id.
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let mut peermap = HashMap::new();
+    peermap.insert(user.get_id(), (peer.clone(), key, None));
+    let (_, prvkey) = Peer::keypairgen()?;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+
+    assert!(conn.get_peer(&user.get_id()).unwrap().get_last_heartbeat().is_none());
+    conn.read_heartbeat(&chat, user.get_id()).await?;
+
+    // In-memory peermap updated synchronously.
+    assert!(conn.get_peer(&user.get_id()).unwrap().get_last_heartbeat().is_some(), "in-memory heartbeat set");
+
+    // DB update is spawned — wait, then verify it landed.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let db_peer = chat.db.read_peer(peer.get_id()).await?.expect("peer in db");
+    assert!(db_peer.get_last_heartbeat().is_some(), "heartbeat persisted to db");
+    Ok(())
+}

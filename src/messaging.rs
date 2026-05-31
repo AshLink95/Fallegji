@@ -16,9 +16,8 @@ pub struct Message {
 pub struct Chat {
     pub message_history: Arc<RwLock<Vec<Message>>>,
     pub members: Arc<RwLock<HashMap<u64, User>>>, // user_id -> User
-    pub peers: Arc<RwLock<HashMap<u64, Peer>>>, // user_id -> Peer
     pub current_user: User,
-    db: Database
+    pub db: Database
 }
 
 impl Message {
@@ -62,14 +61,13 @@ impl Chat {
         let system_message = db.create_message(0, format!("Chat '{}' created by {}", chat_name, user_name)).await?;
         let message_history = vec![system_message];
 
-        let peermap = Peermap::new();
-        let mut peers = HashMap::new();
-        peers.insert(user_id, peer);
+        let mut peermap = Peermap::new();
+        let self_key = peer.shrdkeygen(prvkey.clone());
+        peermap.insert(user_id, (peer.clone(), self_key, None));
 
         Ok((Self {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
-            peers: Arc::new(RwLock::new(peers)),
             current_user,
             db
         }, prvkey, pubkey, user_id, peer_id, peermap))
@@ -93,12 +91,10 @@ impl Chat {
         let current_user = db.read_user(current_user_id).await?
             .ok_or_else(|| anyhow::anyhow!("User not found in database"))?;
 
-        let mut peers = HashMap::new();
         let mut peersmap = HashMap::new();
         let mut connect_tasks = Vec::new();
         for peer in all_peers {
             if let Some(peer_user_id) = peer.get_user_id() {
-                peers.insert(peer_user_id, peer.clone());
                 let shared_key = peer.shrdkeygen(prvkey.clone());
                 let addr = peer.get_addr();
                 connect_tasks.push((peer_user_id, peer, shared_key, tokio::spawn(async move {
@@ -119,7 +115,6 @@ impl Chat {
         Ok((Self {
             message_history: Arc::new(RwLock::new(message_history_vec)),
             members: Arc::new(RwLock::new(members)),
-            peers: Arc::new(RwLock::new(peers)),
             current_user,
             db
         }, peersmap))
@@ -128,7 +123,7 @@ impl Chat {
 
 
 //TODO: sending and receiving messages
-//TODO: presence update (if last heartbeat is None, users are online)
+//TODO: presence update (online = last_heartbeat recent vs now; None = never been online)
 //TODO: typing_indicators - show when peer is typing (special message packets)
 //TODO: read_receipts - notify when messages are seen (last heartbeat time > sent time)
 //TODO: db updates and syncs (when connecting and when exiting only)

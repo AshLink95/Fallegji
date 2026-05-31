@@ -1,4 +1,4 @@
-mod connection; //TODO
+mod connection;
 mod messaging;  //TODO: dependant on connection
 mod ui_screens; //TODO: dependant on messaging
 mod app;        //TODO: dependant on everything

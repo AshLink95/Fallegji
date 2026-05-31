@@ -99,7 +99,7 @@ pub async fn app() -> Result<()> {
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
     // let token = CancellationToken::new();
-    let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String)>::new()));
+    let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String, PublicKey)>::new()));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;

@@ -7,6 +7,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{auth::{Uid, Authentication, Role, User}, connection::Peer, messaging::Message};
 
+#[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
@@ -208,7 +209,7 @@ impl Database {
                 let pubkey = PublicKey::from(row.get::<_, [u8; 32]>(2)?);
                 let last_heartbeat = row.get::<_, Option<i64>>(3)?;
 
-                let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, last_heartbeat).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, None, last_heartbeat).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                 Ok(Some(peer))
             }) {
                 Ok(p) => p.unwrap(),
@@ -495,7 +496,7 @@ impl Database {
                        let pubkey = PublicKey::from(pubkey_array);
                        let last_heartbeat = row.get::<_, Option<i64>>(3)?;
 
-                       let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, last_heartbeat)
+                       let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, None, last_heartbeat)
                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                        Ok(Some(peer))
                    }).unwrap_or_default();
@@ -734,6 +735,27 @@ impl Database {
             let count = count_stmt.query_row([], |row| row.get::<_, u32>(0))?;
 
             Ok(count as usize)
+        }).await?
+    }
+
+    /// Snapshot the whole DB as raw SQLite bytes
+    pub async fn dump(&self) -> Result<Vec<u8>> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let data = conn.serialize(rusqlite::MAIN_DB)?;
+            Ok(data.to_vec())
+        }).await?
+    }
+
+    /// Replace this DB in-place with a received SQLite snapshot (counterpart to `dump`).
+    pub async fn load(&self, bytes: Vec<u8>) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        task::spawn_blocking(move || {
+            let mut conn = conn.lock().unwrap();
+            let sz = bytes.len();
+            conn.deserialize_read_exact(rusqlite::MAIN_DB, std::io::Cursor::new(bytes), sz, false)?;
+            Ok(())
         }).await?
     }
 }
