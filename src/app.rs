@@ -46,6 +46,7 @@ async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<
     let prvkey = config.prvkey.as_ref().unwrap().clone();
     let (chat, peermap) = Chat::old(choice, config.user_name.as_ref().unwrap(), prvkey.clone()).await?;
     let conn = Connection::new(prvkey, config.rendezvous.unwrap(), socket, peermap).await;
+    chat.send_join(&conn).await?;
     //TODO: start listening for requests
 
     *ran = false;

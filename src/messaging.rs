@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::{Arc, RwLock}, time::Duration};
+use std::{collections::HashMap, io::Seek, sync::{Arc, RwLock}, time::Duration};
 use anyhow::Result;
 use tokio::{net::TcpStream, sync::Mutex as TokioMutex, time::timeout};
 use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
-use crate::{auth::{Role, Uid, User}, connection::{KeyGen, Peer, Peermap}, db::Database};
+use crate::{auth::{Role, Uid, User}, connection::{Communication, Connection, KeyGen, Peer, Peermap}, db::Database};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -58,7 +58,7 @@ impl Chat {
         members.insert(user_id, current_user.clone());
         members.insert(0u64, sys);
 
-        let system_message = db.create_message(0, format!("Chat '{}' created by {}", chat_name, user_name)).await?;
+        let system_message = db.create_message(0, format!("Chat '{}' created by {}", chat_name, user_name), None).await?;
         let message_history = vec![system_message];
 
         let mut peermap = Peermap::new();
@@ -108,22 +108,29 @@ impl Chat {
             peersmap.insert(peer_user_id, (peer, shared_key, tcp_stream));
         }
 
-        let join_message = db.create_message(0, format!("{} joined the chat", user_name)).await?;
-        let mut message_history_vec = message_history;
-        message_history_vec.push(join_message);
-
         Ok((Self {
-            message_history: Arc::new(RwLock::new(message_history_vec)),
+            message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
             current_user,
             db
         }, peersmap))
     }
+
+    pub fn get_admin(&self) -> Option<u64> {
+        self.members.read().unwrap().iter().find(
+            |(_, user)| user.get_role().is_some_and(|r| r == Role::Admin)
+        ).map(|(id, _)| *id)
+    }
+
+    pub async fn send_message(&self, conn: &Connection, sender_id: u64, contents: String) -> Result<()> {
+        let message = self.db.create_message(sender_id, contents, None).await?;
+        self.message_history.write().unwrap().push(message.clone());
+        conn.send_msg(message).await?;
+        Ok(())
+    }
+
+    pub async fn send_join(&self, conn: &Connection) -> Result<()> {
+        let user_name = self.current_user.get_name();
+        self.send_message(conn, 0, format!("{} joined the chat", user_name)).await
+    }
 }
-
-
-//TODO: sending and receiving messages
-//TODO: presence update (online = last_heartbeat recent vs now; None = never been online)
-//TODO: typing_indicators - show when peer is typing (special message packets)
-//TODO: read_receipts - notify when messages are seen (last heartbeat time > sent time)
-//TODO: db updates and syncs (when connecting and when exiting only)

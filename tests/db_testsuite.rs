@@ -90,7 +90,7 @@ async fn test_create_read_message() -> Result<()> {
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     
     // Create message
-    let msg: Message = db.create_message(user.get_id(), "Hello world!".to_string()).await?;
+    let msg: Message = db.create_message(user.get_id(), "Hello world!".to_string(), None).await?;
     assert_eq!(msg.get_contents(), "Hello world!");
     assert!(msg.get_id() > 0);
     assert!(msg.get_sent_at() > 0);
@@ -179,7 +179,7 @@ async fn test_update_message() -> Result<()> {
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     let user = db.create_user(pubkey_hex, "charlie".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let msg = db.create_message(user.get_id(), "Original message".to_string()).await?;
+    let msg = db.create_message(user.get_id(), "Original message".to_string(), None).await?;
     
     // Update contents
     let updated = db.update_message_contents(msg.get_id(), "Updated message".to_string()).await?;
@@ -212,7 +212,7 @@ async fn test_delete() -> Result<()> {
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     let user = db.create_user(pubkey_hex, "delete_test".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let msg = db.create_message(user.get_id(), "Test message".to_string()).await?;
+    let msg = db.create_message(user.get_id(), "Test message".to_string(), None).await?;
     
     // Delete message
     let msg_deleted = db.delete_message(msg.get_id()).await?;
@@ -260,8 +260,8 @@ async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
     let user2 = db.create_user(pubkey2_hex, "bob".to_string(), Uid::getuid()).await?;
     db.update_peer_link_user(peer2.get_id(), user2.get_id()).await?;
     
-    let _ = db.create_message(user1.get_id(), "First message".to_string()).await?;
-    let _ = db.create_message(user2.get_id(), "Second message".to_string()).await?;
+    let _ = db.create_message(user1.get_id(), "First message".to_string(), None).await?;
+    let _ = db.create_message(user2.get_id(), "Second message".to_string(), None).await?;
     
     // Load all users
     let users = db.load_all_users().await?;
@@ -320,7 +320,7 @@ async fn test_save_all() -> Result<()> {
     assert_eq!(peers_saved, 2);
 
     // Create messages - one in DB, two in memory
-    let _ = db.create_message(user1.get_id(), "In DB".to_string()).await?;
+    let _ = db.create_message(user1.get_id(), "In DB".to_string(), None).await?;
     let msg2 = Message::new(-1, user1.get_id(), "Memory 1".to_string());
     let mut msg3 = Message::new(-2, user2.get_id(), "Memory 2".to_string());
     msg3.set_date(time::OffsetDateTime::now_utc().unix_timestamp() + 100);
@@ -362,7 +362,7 @@ async fn test_dump_load() -> Result<()> {
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     let user = src.db.create_user(pubkey_hex, "alice".to_string(), Uid::getuid()).await?;
     src.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let _ = src.db.create_message(user.get_id(), "hello".to_string()).await?;
+    let _ = src.db.create_message(user.get_id(), "hello".to_string(), None).await?;
 
     // Dump → non-empty raw sqlite bytes.
     let bytes = src.db.dump().await?;

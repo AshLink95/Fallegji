@@ -1,6 +1,6 @@
 // prompt engineered
 use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
-use tokio::{net::{TcpListener, TcpStream}, sync::Mutex, io::AsyncReadExt};
+use tokio::{net::{TcpListener, TcpStream}, sync::Mutex, io::{AsyncReadExt, AsyncWriteExt}};
 
 async fn free_rendezvous_addr() -> SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -10,7 +10,7 @@ async fn free_rendezvous_addr() -> SocketAddr {
 }
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port}, messaging::{Message, Chat}, auth::{Uid, User}, db::Database};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port}, messaging::{Message, Chat}, auth::{Uid, User, Role}, db::Database};
 use hex::ToHex;
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
@@ -18,6 +18,8 @@ use anyhow::Result;
 
 // Header bytes (mirror connection.rs private consts)
 const HBT_HD: u8 = 0xE2;
+const DBR_HD: u8 = 0xB5;
+const NWP_HD: u8 = 0xA6;
 const TYP_HD: u8 = 0xD3;
 
 /// Build a Connection holding one peer wired to a live TCP stream.
@@ -60,137 +62,88 @@ fn test_chat() -> Result<Chat> {
     })
 }
 
-#[test]
-fn test_peer_new_out_creation() {
-    let result = Peer::new_out(1, 9000);
-    assert!(result.is_ok());
-
-    let (peer, prvkey) = result.unwrap();
-    assert_eq!(peer.get_id(), 1);
-    assert_eq!(peer.get_user_id(), None);
-    assert_eq!(peer.get_addr().port(), 9000);
-    assert_eq!(peer.get_last_heartbeat(), None);
-    assert_ne!(peer.get_addr().ip(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
-    assert_eq!(prvkey.as_bytes().len(), 32);
-}
-
-#[test]
-fn test_peer_new_in_creation() {
-    let peer_id = 2;
-    let peer_name = "TestPeer".to_string();
-    let peer_uid = Uid::from(10);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-    let tmp_secret = StaticSecret::from([1u8; 32]);
-    let pubkey = PublicKey::from(&tmp_secret);
-    let last_heartbeat = Some(1234567890i64);
-    let last_seen_typing = Some(1111111111i64);
-
-    // Real user_id so ver_id passes and new_in succeeds.
-    let pubkey_hex: String = pubkey.as_bytes().encode_hex();
-    let peer_user_id = User::new(pubkey_hex, peer_name.clone(), peer_uid).get_id();
-
-    let peer = Peer::new_in(
-        peer_id,
-        peer_name,
-        peer_uid,
-        peer_user_id,
-        addr,
-        pubkey,
-        last_seen_typing,
-        last_heartbeat,
-    ).expect("new_in should succeed with a valid user_id");
-
-    assert_eq!(peer.get_id(), peer_id);
-    assert_eq!(peer.get_user_id(), Some(peer_user_id));
-    assert_eq!(peer.get_addr(), addr);
-    assert_eq!(peer.get_last_heartbeat(), last_heartbeat);
-    assert_eq!(peer.get_last_seen_typing(), last_seen_typing);
-
-    // Invalid user_id is rejected.
-    let bad = Peer::new_in(peer_id, "x".to_string(), peer_uid, 999u64, addr, pubkey, None, None);
-    assert!(bad.is_err());
-}
-
-#[test]
-fn test_peer_getters() {
-    let (peer, _prvkey) = Peer::new_out(3, 8080).unwrap();
-
-    assert_eq!(peer.get_id(), 3);
-    assert_eq!(peer.get_user_id(), None);
-    assert_eq!(peer.get_addr().port(), 8080);
-    assert_eq!(peer.get_last_heartbeat(), None);
-    assert_eq!(peer.get_last_seen_typing(), None);
-
-    let pubkey = peer.get_pubkey();
-    assert_eq!(pubkey.as_bytes().len(), 32);
-}
-
-#[test]
-fn test_peer_setters() {
-    let (mut peer, _prvkey) = Peer::new_out(-1, 8080).unwrap();
-
-    peer.set_id(10);
-    assert_eq!(peer.get_id(), 10);
-
-    peer.set_id(20);
-    assert_eq!(peer.get_id(), 10);
-
-    let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-    peer.set_addr(new_addr);
-    assert_eq!(peer.get_addr(), new_addr);
-
-    peer.set_last_heartbeat(Some(1234567890));
-    assert_eq!(peer.get_last_heartbeat(), Some(1234567890));
-
-    peer.set_last_heartbeat(None);
-    assert_eq!(peer.get_last_heartbeat(), None);
-
-    peer.set_last_seen_typing(Some(42));
-    assert_eq!(peer.get_last_seen_typing(), Some(42));
-
-    peer.set_last_seen_typing(None);
-    assert_eq!(peer.get_last_seen_typing(), None);
-
-    let user_name = "TestUser".to_string();
-    let user_id = 999u64;
-    let user_uid = Uid::from(11);
-
-    let result = peer.set_user_id(user_name.clone(), user_id, user_uid);
-
-    if result.is_ok() {
-        assert_eq!(peer.get_user_id(), Some(user_id));
-
-        let result2 = peer.set_user_id("Another".to_string(), 888, Uid::from(12));
-        assert!(result2.is_err());
-        assert_eq!(peer.get_user_id(), Some(user_id)); // Should still be original
-    }
-}
-
-#[test]
-fn test_keygen() {
-    let result = Peer::keypairgen();
-    assert!(result.is_ok());
-
-    let (pubkey1, prvkey1) = result.unwrap();
-    assert_eq!(pubkey1.as_bytes().len(), 32);
-    assert_eq!(prvkey1.as_bytes().len(), 32);
-    let (pubkey2, _prvkey2) = Peer::keypairgen().unwrap();
-    assert_ne!(pubkey1.as_bytes(), pubkey2.as_bytes());
-
-    let (peer, peer_prvkey) = Peer::new_out(1, 8080).unwrap();
-    let (other_peer, other_prvkey) = Peer::new_out(2, 8081).unwrap();
-    let shared1 = peer.shrdkeygen(other_prvkey);
-    let shared2 = other_peer.shrdkeygen(peer_prvkey);
-    assert_eq!(shared1.as_slice(), shared2.as_slice());
-    assert_eq!(shared1.as_slice().len(), 32);
-}
-
 // Header bytes (mirror connection.rs private consts)
 const MSG_HD: u8 = 0xF1;
 const DBS_HD: u8 = 0xC4;
 
+/// Peer lifecycle: creation (new_out/new_in), getters, setters, presence windows.
 #[test]
-fn test_secrecy() {
+fn test_peer() {
+    // new_out: fresh local peer.
+    let (peer, prvkey) = Peer::new_out(1, 9000).unwrap();
+    assert_eq!(peer.get_id(), 1);
+    assert_eq!(peer.get_user_id(), None);
+    assert_eq!(peer.get_addr().port(), 9000);
+    assert_eq!(peer.get_last_heartbeat(), None);
+    assert_eq!(peer.get_last_seen_typing(), None);
+    assert_ne!(peer.get_addr().ip(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+    assert_eq!(peer.get_pubkey().as_bytes().len(), 32);
+    assert_eq!(prvkey.as_bytes().len(), 32);
+
+    // new_in: imported peer, valid + invalid user_id.
+    let name = "TestPeer".to_string();
+    let uid = Uid::from(10);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+    let pubkey = PublicKey::from(&StaticSecret::from([1u8; 32]));
+    let pubkey_hex: String = pubkey.as_bytes().encode_hex();
+    let user_id = User::new(pubkey_hex, name.clone(), uid).get_id();
+    let imported = Peer::new_in(2, name, uid, user_id, addr, pubkey, Some(1111), Some(1234567890))
+        .expect("valid new_in");
+    assert_eq!(imported.get_id(), 2);
+    assert_eq!(imported.get_user_id(), Some(user_id));
+    assert_eq!(imported.get_addr(), addr);
+    assert_eq!(imported.get_last_heartbeat(), Some(1234567890));
+    assert_eq!(imported.get_last_seen_typing(), Some(1111));
+    assert!(Peer::new_in(2, "x".to_string(), uid, 999, addr, pubkey, None, None).is_err(),
+        "bad user_id rejected");
+
+    // setters.
+    let (mut peer, _) = Peer::new_out(-1, 8080).unwrap();
+    peer.set_id(10);
+    assert_eq!(peer.get_id(), 10);
+    peer.set_id(20); // id only settable while < 0
+    assert_eq!(peer.get_id(), 10);
+    let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
+    peer.set_addr(new_addr);
+    assert_eq!(peer.get_addr(), new_addr);
+    peer.set_last_heartbeat(Some(1));
+    assert_eq!(peer.get_last_heartbeat(), Some(1));
+    peer.set_last_seen_typing(Some(2));
+    assert_eq!(peer.get_last_seen_typing(), Some(2));
+
+    // presence windows: is_online (3s), is_typing (1s); never-seen → false.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let (mut p, _) = Peer::new_out(1, 9000).unwrap();
+    assert!(!p.is_online() && !p.is_typing());
+    p.set_last_heartbeat(Some(now));
+    assert!(p.is_online());
+    p.set_last_heartbeat(Some(now - 10));
+    assert!(!p.is_online());
+    p.set_last_seen_typing(Some(now));
+    assert!(p.is_typing());
+    p.set_last_seen_typing(Some(now - 10));
+    assert!(!p.is_typing());
+}
+
+/// Crypto: keypair gen, shared-key agreement, encode/decode roundtrip + compression + tamper.
+#[test]
+fn test_crypto() {
+    // Keypair gen: distinct keys, correct length.
+    let (pub1, prv1) = Peer::keypairgen().unwrap();
+    assert_eq!(pub1.as_bytes().len(), 32);
+    assert_eq!(prv1.as_bytes().len(), 32);
+    let (pub2, _) = Peer::keypairgen().unwrap();
+    assert_ne!(pub1.as_bytes(), pub2.as_bytes());
+
+    // Shared-key agreement: both sides derive the same key.
+    let (peer_a, prv_a) = Peer::new_out(1, 8080).unwrap();
+    let (peer_b, prv_b) = Peer::new_out(2, 8081).unwrap();
+    let shared1 = peer_a.shrdkeygen(prv_b);
+    let shared2 = peer_b.shrdkeygen(prv_a);
+    assert_eq!(shared1.as_slice(), shared2.as_slice());
+    assert_eq!(shared1.as_slice().len(), 32);
+
     let key_bytes: &[u8; 32] = b"super-secret-32-byte-key!!-12345";
     let key = Key::from_slice(key_bytes);
     let wrong_key = Key::from_slice(b"wrong-key-does-not-match-1234567");
@@ -325,30 +278,19 @@ async fn test_rendezvous_requests() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let client_name = "TestUser".to_string();
-    let client_handle = tokio::spawn(async move {
-        client_conn.snd_requests(client_name).await
-    });
-    let client_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        client_handle
-    ).await;
-
+    // Run the client in-place so we keep client_conn to inspect afterward.
+    let client_success = client_conn.snd_requests("TestUser".to_string()).await?;
     token.cancel();
-    let server_result = tokio::time::timeout(
-        Duration::from_secs(5),
-        server_handle
-    ).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
 
-    assert!(client_result.is_ok(), "Client task timed out");
-    let client_success = client_result.unwrap().unwrap()?;
     assert!(client_success, "Client did not receive valid acknowledgment");
-    assert!(server_result.is_ok(), "Server task timed out");
-    server_result.unwrap().unwrap()?;
     let reqs = requests.lock().await;
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].1, "TestUser");
     assert_eq!(reqs[0].0, client_addr, "Recorded addr must match client's socket");
+
+    // Handshake side-effect: newcomer derived the admin key and stored it (provisional key 0).
+    assert!(client_conn.get_peer(&0).is_some(), "newcomer stored admin in peermap");
 
     Ok(())
 }
@@ -407,52 +349,33 @@ async fn bare_conn() -> Result<Connection> {
 
 // --- send path: each broadcast emits a valid, decryptable frame with the right header ---
 
+/// All broadcasts emit a valid, decryptable frame with the right header.
 #[tokio::test]
-async fn test_send_msg_frame() -> Result<()> {
+async fn test_send_frames() -> Result<()> {
     let (conn, mut server, key) = conn_with_peer().await?;
-    conn.send_msg(Message::new(1, 42, "hello".to_string())).await?;
 
-    let frame = read_frame(&mut server).await?;
-    let (header, payload) = Connection::decode(&key, &frame)?;
-    assert_eq!(header, MSG_HD);
+    // MSG: payload round-trips to the Message.
+    conn.send_msg(Message::new(1, 42, "hello".to_string())).await?;
+    let (h, payload) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(h, MSG_HD);
     let got: Message = serde_json::from_slice(&payload)?;
     assert_eq!(got.get_contents(), "hello");
     assert_eq!(got.get_sender_id(), 42);
-    Ok(())
-}
 
-#[tokio::test]
-async fn test_send_heartbeat_frame() -> Result<()> {
-    let (conn, mut server, key) = conn_with_peer().await?;
+    // HEARTBEAT.
     conn.send_heartbeat().await?;
+    let (h, _) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(h, HBT_HD);
 
-    let frame = read_frame(&mut server).await?;
-    let (header, _payload) = Connection::decode(&key, &frame)?;
-    assert_eq!(header, HBT_HD);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_send_typing_frame() -> Result<()> {
-    let (conn, mut server, key) = conn_with_peer().await?;
+    // TYPING.
     conn.send_typing().await?;
+    let (h, _) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(h, TYP_HD);
 
-    let frame = read_frame(&mut server).await?;
-    let (header, _payload) = Connection::decode(&key, &frame)?;
-    assert_eq!(header, TYP_HD);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_send_db_sync_frame() -> Result<()> {
-    let (conn, mut server, key) = conn_with_peer().await?;
-    let db = Database::new(":memory:")?;
-    conn.send_db_sync(&db).await?;
-
-    let frame = read_frame(&mut server).await?;
-    let (header, payload) = Connection::decode(&key, &frame)?;
-    assert_eq!(header, DBS_HD);
-    // payload is the serialized raw sqlite snapshot — non-empty.
+    // DB SYNC: payload is the non-empty raw sqlite snapshot.
+    conn.send_db_sync(&Database::new(":memory:")?).await?;
+    let (h, payload) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(h, DBS_HD);
     let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
     assert!(!bytes.is_empty());
     Ok(())
@@ -460,140 +383,227 @@ async fn test_send_db_sync_frame() -> Result<()> {
 
 // --- read path: dispatched reads mutate the shared Chat ---
 
+/// Receiving data: a message (history + db), db_sync snapshot (adopt + reject),
+/// and new-peer bootstrap (adopt admin's db).
 #[tokio::test]
-async fn test_read_msg_appends_history() -> Result<()> {
+async fn test_read_data() -> Result<()> {
+    // read_msg: appended to history + persisted.
     let chat = test_chat()?;
-    // Sender must exist as a user (create_message joins users).
     let (peer, _) = chat.db.create_peer(9000).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     let sender = chat.db.create_user(pubkey_hex, "sender".to_string(), Uid::getuid()).await?;
     chat.db.update_peer_link_user(peer.get_id(), sender.get_id()).await?;
-
     let conn = bare_conn().await?;
-    let payload = serde_json::to_vec(&Message::new(7, sender.get_id(), "incoming".to_string()))?;
-
-    conn.read_msg(&chat, payload).await?;
-
-    // In-memory history updated synchronously.
-    {
-        let hist = chat.message_history.read().unwrap();
-        assert!(hist.iter().any(|m| m.get_contents() == "incoming"));
-    }
-    // DB persist is spawned off the hot path — give it a moment, then verify.
+    conn.read_msg(&chat, serde_json::to_vec(&Message::new(7, sender.get_id(), "incoming".to_string()))?).await?;
+    assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "incoming"));
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let stored = chat.db.load_all_messages().await?;
-    assert!(stored.iter().any(|m| m.get_contents() == "incoming"), "message persisted to db");
-    Ok(())
-}
+    assert!(chat.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "incoming"), "msg persisted");
 
-#[tokio::test]
-async fn test_read_db_sync_adopts_superset() -> Result<()> {
-    // Build a source DB with a user + message; its snapshot is the superset.
+    // read_db_sync: superset snapshot adopted (db + members).
     let src = Database::new(":memory:")?;
-    let (peer, _) = src.create_peer(9000).await?;
-    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = src.create_user(pubkey_hex, "alice".to_string(), Uid::getuid()).await?;
-    src.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let _ = src.create_message(user.get_id(), "synced".to_string()).await?;
+    let (sp, _) = src.create_peer(9000).await?;
+    let sp_hex = sp.get_pubkey().to_bytes().encode_hex::<String>();
+    let su = src.create_user(sp_hex, "alice".to_string(), Uid::getuid()).await?;
+    src.update_peer_link_user(sp.get_id(), su.get_id()).await?;
+    let _ = src.create_message(su.get_id(), "synced".to_string(), None).await?;
     let snapshot = src.dump().await?;
+    let chat_a = test_chat()?;
+    conn.read_db_sync(&chat_a, serde_json::to_vec(&snapshot)?).await?;
+    assert!(chat_a.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "synced"), "snapshot adopted");
+    assert!(chat_a.members.read().unwrap().values().any(|u| u.get_name() == "alice"));
 
-    // Empty local chat → trivially a subset → snapshot is adopted.
-    let chat = test_chat()?;
-    let conn = bare_conn().await?;
-    let payload = serde_json::to_vec(&snapshot)?;
+    // read_db_sync: conflicting snapshot (missing local data) rejected.
+    let empty = Database::new(":memory:")?.dump().await?;
+    let chat_b = test_chat()?;
+    let (bp, _) = chat_b.db.create_peer(9001).await?;
+    let bp_hex = bp.get_pubkey().to_bytes().encode_hex::<String>();
+    let bu = chat_b.db.create_user(bp_hex, "bob".to_string(), Uid::getuid()).await?;
+    chat_b.db.update_peer_link_user(bp.get_id(), bu.get_id()).await?;
+    let _ = chat_b.db.create_message(bu.get_id(), "local only".to_string(), None).await?;
+    conn.read_db_sync(&chat_b, serde_json::to_vec(&empty)?).await?;
+    assert!(chat_b.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "local only"), "conflict not clobbered");
 
-    conn.read_db_sync(&chat, payload).await?;
-
-    {
-        let hist = chat.message_history.read().unwrap();
-        assert!(hist.iter().any(|m| m.get_contents() == "synced"), "message adopted (memory)");
-        let members = chat.members.read().unwrap();
-        assert!(members.values().any(|u| u.get_name() == "alice"), "user adopted (memory)");
-    }
-    // DB adopted the snapshot too.
-    let db_msgs = chat.db.load_all_messages().await?;
-    assert!(db_msgs.iter().any(|m| m.get_contents() == "synced"), "message persisted to db");
+    // read_newpeer: newcomer adopts admin's db.
+    let admin_db = Database::new(":memory:")?;
+    let (ap, _) = admin_db.create_peer(9000).await?;
+    let ap_hex = ap.get_pubkey().to_bytes().encode_hex::<String>();
+    let au = admin_db.create_user(ap_hex, "admin".to_string(), Uid::getuid()).await?;
+    admin_db.update_peer_link_user(ap.get_id(), au.get_id()).await?;
+    let admin_snap = admin_db.dump().await?;
+    let chat_c = test_chat()?;
+    let mut conn2 = bare_conn().await?;
+    conn2.set_user(1, "me".to_string(), Uid::from(1));
+    conn2.read_newpeer(&chat_c, serde_json::to_vec(&admin_snap)?).await?;
+    assert!(chat_c.db.load_all_users().await?.iter().any(|u| u.get_name() == "admin"), "newcomer adopted admin db");
     Ok(())
 }
 
+/// Presence reads: get_peer lookup, heartbeat (memory + db), typing (memory).
 #[tokio::test]
-async fn test_read_db_sync_rejects_conflict() -> Result<()> {
-    // Snapshot lacks a message the local DB has → conflict → no adoption.
-    let snapshot = Database::new(":memory:")?.dump().await?; // empty snapshot
-
+async fn test_read_presence() -> Result<()> {
     let chat = test_chat()?;
-    let (peer, _) = chat.db.create_peer(9000).await?;
-    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = chat.db.create_user(pubkey_hex, "bob".to_string(), Uid::getuid()).await?;
-    chat.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let _ = chat.db.create_message(user.get_id(), "local only".to_string()).await?;
-
-    let conn = bare_conn().await?;
-    let payload = serde_json::to_vec(&snapshot)?;
-    conn.read_db_sync(&chat, payload).await?;
-
-    // Local message must survive (snapshot was missing it).
-    let msgs = chat.db.load_all_messages().await?;
-    assert!(msgs.iter().any(|m| m.get_contents() == "local only"), "conflict must not clobber local data");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_read_newpeer_adopts_db() -> Result<()> {
-    // Admin's snapshot the newcomer receives via NWP.
-    let src = Database::new(":memory:")?;
-    let (peer, _) = src.create_peer(9000).await?;
-    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
-    let user = src.create_user(pubkey_hex, "admin".to_string(), Uid::getuid()).await?;
-    src.update_peer_link_user(peer.get_id(), user.get_id()).await?;
-    let snapshot = src.dump().await?;
-
-    let chat = test_chat()?;
-    let mut conn = bare_conn().await?;
-    conn.set_user(1, "me".to_string(), Uid::from(1)); // needed to register self
-    let payload = serde_json::to_vec(&snapshot)?;
-
-    conn.read_newpeer(&chat, payload).await?;
-
-    let users = chat.db.load_all_users().await?;
-    assert!(users.iter().any(|u| u.get_name() == "admin"), "newcomer adopts admin's DB");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_get_peer() -> Result<()> {
-    let (conn, _server, _key) = conn_with_peer().await?;
-    // conn_with_peer keys the peer under user_id 1.
-    assert!(conn.get_peer(&1).is_some(), "known peer returned");
-    assert!(conn.get_peer(&999).is_none(), "unknown peer is None");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_read_heartbeat_updates_and_persists() -> Result<()> {
-    let chat = test_chat()?;
-    // Peer must exist in the db (with a linked user) so read_peer can read it back.
     let (peer, _) = chat.db.create_peer(9000).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
     let user = chat.db.create_user(pubkey_hex, "p".to_string(), Uid::getuid()).await?;
     chat.db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let uid = user.get_id();
 
-    // Wire that peer into the connection peermap, keyed by user_id.
     let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
     let mut peermap = HashMap::new();
-    peermap.insert(user.get_id(), (peer.clone(), key, None));
+    peermap.insert(uid, (peer.clone(), key, None));
     let (_, prvkey) = Peer::keypairgen()?;
     let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
 
-    assert!(conn.get_peer(&user.get_id()).unwrap().get_last_heartbeat().is_none());
-    conn.read_heartbeat(&chat, user.get_id()).await?;
+    // get_peer: known + unknown.
+    assert!(conn.get_peer(&uid).is_some(), "known peer");
+    assert!(conn.get_peer(&999).is_none(), "unknown peer");
 
-    // In-memory peermap updated synchronously.
-    assert!(conn.get_peer(&user.get_id()).unwrap().get_last_heartbeat().is_some(), "in-memory heartbeat set");
-
-    // DB update is spawned — wait, then verify it landed.
+    // heartbeat: in-memory + persisted.
+    assert!(conn.get_peer(&uid).unwrap().get_last_heartbeat().is_none());
+    conn.read_heartbeat(&chat, uid).await?;
+    assert!(conn.get_peer(&uid).unwrap().get_last_heartbeat().is_some(), "in-memory heartbeat");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let db_peer = chat.db.read_peer(peer.get_id()).await?.expect("peer in db");
-    assert!(db_peer.get_last_heartbeat().is_some(), "heartbeat persisted to db");
+    assert!(chat.db.read_peer(peer.get_id()).await?.unwrap().get_last_heartbeat().is_some(), "heartbeat persisted");
+
+    // typing: in-memory.
+    assert!(conn.get_peer(&uid).unwrap().get_last_seen_typing().is_none());
+    conn.read_typing(uid).await?;
+    assert!(conn.get_peer(&uid).unwrap().get_last_seen_typing().is_some(), "typing set");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_send_db_req_targets_admin() -> Result<()> {
+    // TCP pair: client end goes into the peermap, server end is what we read.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let laddr = listener.local_addr()?;
+    let client = TcpStream::connect(laddr).await?;
+    let (mut server, _) = listener.accept().await?;
+
+    // Admin member, and an online peer (heartbeat = now) wired to the stream.
+    let mut admin = User::new("k".to_string(), "admin".to_string(), Uid::from(1));
+    admin.set_role(Role::Admin);
+    let admin_id = admin.get_id();
+
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let (mut peer, _) = Peer::new_out(1, 9000)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    peer.set_last_heartbeat(Some(now)); // online
+    let mut peermap = HashMap::new();
+    peermap.insert(admin_id, (peer, key, Some(Arc::new(Mutex::new(client)))));
+
+    let (_, prvkey) = Peer::keypairgen()?;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+
+    let chat = test_chat()?;
+    chat.members.write().unwrap().insert(admin_id, admin);
+
+    conn.send_db_req(&chat).await?;
+
+    // A DBR_HD request reached the admin.
+    let frame = read_frame(&mut server).await?;
+    let (header, _) = Connection::decode(&key, &frame)?;
+    assert_eq!(header, DBR_HD);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_db_req_responds_with_sync() -> Result<()> {
+    // A received db request triggers a db_sync back to the requester.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let laddr = listener.local_addr()?;
+    let client = TcpStream::connect(laddr).await?;
+    let (mut server, _) = listener.accept().await?;
+
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let (peer, _) = Peer::new_out(1, 9000)?;
+    let mut peermap = HashMap::new();
+    peermap.insert(5u64, (peer, key, Some(Arc::new(Mutex::new(client)))));
+    let (_, prvkey) = Peer::keypairgen()?;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+
+    let chat = test_chat()?;
+    conn.read_db_req(&chat).await?;
+
+    let (header, _) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(header, DBS_HD, "db request answered with a db sync");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_send_newpeer() -> Result<()> {
+    // Admin dials the newcomer and seeds it with an NWP frame (raw db snapshot).
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let laddr = listener.local_addr()?;
+
+    let (_, admin_prv) = Peer::keypairgen()?;
+    let (new_pub, new_prv) = Peer::keypairgen()?;
+    let db = Database::new(":memory:")?;
+    let conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, get_free_port().await?, HashMap::new()).await;
+
+    let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+    conn.send_newpeer(laddr, new_pub, &db).await?;
+    let mut server = accept.await?;
+
+    // Reconstruct the shared key the newcomer would derive: DH(new_prv, admin_pub).
+    let admin_pub = PublicKey::from(&admin_prv);
+    let admin_hex: String = admin_pub.as_bytes().encode_hex();
+    let aid = User::new(admin_hex, "a".to_string(), Uid::from(1)).get_id();
+    let admin_peer = Peer::new_in(-1, "a".to_string(), Uid::from(1), aid, laddr, admin_pub, None, None).unwrap();
+    let key = admin_peer.shrdkeygen(new_prv);
+
+    let (header, payload) = Connection::decode(&key, &read_frame(&mut server).await?)?;
+    assert_eq!(header, NWP_HD);
+    let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
+    assert!(!bytes.is_empty(), "NWP carries the db snapshot");
+    Ok(())
+}
+
+/// Integration: spawn listen as a background task, push a burst of frames over one
+/// connection, and verify every header dispatched to the right handler (state mutated).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_listen_dispatch() -> Result<()> {
+    let chat = Arc::new(test_chat()?);
+    // Sender must exist (read_msg joins users; heartbeat reads the peer back).
+    let (peer, _) = chat.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let sender = chat.db.create_user(pubkey_hex, "sender".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(peer.get_id(), sender.get_id()).await?;
+    let sid = sender.get_id();
+
+    // Connection knows this peer's key, so listen can decode its frames.
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let mut peermap = HashMap::new();
+    peermap.insert(sid, (peer.clone(), key, None));
+    let (_, prvkey) = Peer::keypairgen()?;
+    let socket = get_free_port().await?;
+    let addr = socket.0;
+    let conn = Arc::new(Connection::new(prvkey, free_rendezvous_addr().await, socket, peermap).await);
+
+    // Background listen loop.
+    let lconn = Arc::clone(&conn);
+    let lchat = Arc::clone(&chat);
+    tokio::spawn(async move { let _ = lconn.listen(lchat).await; });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Burst of frames: message, heartbeat, typing.
+    let mut client = TcpStream::connect(addr).await?;
+    for frame in [
+        Connection::encode(&key, MSG_HD, Message::new(1, sid, "live".to_string()))?,
+        Connection::encode(&key, HBT_HD, ())?,
+        Connection::encode(&key, TYP_HD, ())?,
+    ] {
+        client.write_all(&(frame.len() as u32).to_be_bytes()).await?;
+        client.write_all(&frame).await?;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // MSG dispatched → history.
+    assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "live"), "message dispatched");
+    // HBT + TYP dispatched → peer presence updated.
+    let p = conn.get_peer(&sid).expect("peer present");
+    assert!(p.get_last_heartbeat().is_some(), "heartbeat dispatched");
+    assert!(p.get_last_seen_typing().is_some(), "typing dispatched");
     Ok(())
 }

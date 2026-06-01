@@ -16,7 +16,8 @@ const MSG_HD: u8 = 0xF1;
 const HBT_HD: u8 = 0xE2;
 const TYP_HD: u8 = 0xD3;
 const DBS_HD: u8 = 0xC4;
-const NWP_HD: u8 = 0xB5;
+const DBR_HD: u8 = 0xB5;
+const NWP_HD: u8 = 0xA6;
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -96,6 +97,9 @@ pub trait Communication {
 
     async fn send_db_sync(&self, db: &Database) -> Result<()>;
     async fn read_db_sync(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
+
+    async fn send_db_req(&self, chat: &Chat) -> Result<()>;
+    async fn read_db_req(&self, chat: &Chat) -> Result<()>;
 }
 
 impl Peer {
@@ -126,6 +130,26 @@ impl Peer {
             Ok(Self {id, user_id: Some(peer_user_id), addr, pubkey, last_heartbeat, last_seen_typing})
         } else {
             Err(Error::msg("Invalid key or user"))
+        }
+    }
+
+    /// check if a peer is online
+    pub fn is_online(&self) -> bool {
+        if let Some(time) = self.last_heartbeat {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            time + 3 > now
+        } else {
+            false
+        }
+    }
+
+    /// check if a peer is typing
+    pub fn is_typing(&self) -> bool {
+        if let Some(time) = self.last_seen_typing {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            time + 1 > now
+        } else {
+            false
         }
     }
 
@@ -502,6 +526,7 @@ impl Communication for Connection {
                         HBT_HD => me.read_heartbeat(&chat, peer_id).await,
                         TYP_HD => me.read_typing(peer_id).await,
                         DBS_HD => me.read_db_sync(&chat, payload).await,
+                        DBR_HD => me.read_db_req(&chat).await,
                         NWP_HD => me.read_newpeer(&chat, payload).await,
                         _ => Ok(()),
                     };
@@ -577,9 +602,11 @@ impl Communication for Connection {
         let db = chat.db.clone();
         let sender_id = msg.get_sender_id();
         let contents = msg.get_contents();
+        let sent_at = msg.get_sent_at();
         chat.message_history.write().unwrap().push(msg);
         tokio::spawn(async move {
-            let _ = db.create_message(sender_id, contents).await;
+            // Preserve the sender's timestamp so the message has a stable cross-peer identity.
+            let _ = db.create_message(sender_id, contents, Some(sent_at)).await;
         });
         Ok(())
     }
@@ -652,7 +679,7 @@ impl Communication for Connection {
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_secs() as i64;
-            peer.set_last_heartbeat(Some(timestamp));
+            peer.set_last_seen_typing(Some(timestamp));
         }
         Ok(())
     }
@@ -680,59 +707,69 @@ impl Communication for Connection {
     async fn read_db_sync(&self, chat: &Chat, payload: Vec<u8>) -> Result<()> {
         let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
         let incoming = Database::new(":memory:")?;
-        incoming.load(bytes.clone()).await?;
+        incoming.load(bytes).await?;
         let in_users = incoming.load_all_users().await?;
         let in_peers = incoming.load_all_peers().await?;
         let in_msgs  = incoming.load_all_messages().await?;
         let my_users = chat.db.load_all_users().await?;
         let my_peers = chat.db.load_all_peers().await?;
         let my_msgs  = chat.db.load_all_messages().await?;
-        const TOL: i64 = 2; // Time fields may drift up to 2s
-        let close = |a: Option<i64>, b: Option<i64>| match (a, b) {
-            (None, None) => true,
-            (Some(x), Some(y)) => (x - y).abs() <= TOL,
-            _ => false,
-        };
-        // Every existing local entry must be present in the snapshot.
-        let users_ok = my_users.iter().all(|u| in_users.iter().any(|v|
-            v.get_id() == u.get_id()
-            && v.get_name() == u.get_name()
-            && v.get_role() == u.get_role()
-            && v.get_uid() == u.get_uid()));
-        let peers_ok = my_peers.iter().all(|p| in_peers.iter().any(|q|
-            q.get_id() == p.get_id()
-            && q.get_user_id() == p.get_user_id()
-            && q.get_addr() == p.get_addr()
-            && q.get_pubkey().as_bytes() == p.get_pubkey().as_bytes()
-            && close(q.get_last_heartbeat(), p.get_last_heartbeat())));
-        let msgs_ok = my_msgs.iter().all(|m| in_msgs.iter().any(|n|
-            n.get_id() == m.get_id()
-            && n.get_sender_id() == m.get_sender_id()
-            && n.get_contents() == m.get_contents()
-            && (n.get_sent_at() - m.get_sent_at()).abs() <= TOL));
-        if !(users_ok && peers_ok && msgs_ok) {
-            // Conflict: snapshot is missing/disagrees with local data — don't clobber.
-            return Ok(());
+        let mut users: HashMap<u64, User> = HashMap::new();
+        for u in my_users.into_iter().chain(in_users) {
+            users.entry(u.get_id()).or_insert(u);
         }
-        // Snapshot is a superset → adopt it wholesale, then refresh in-memory views.
-        chat.db.load(bytes).await?;
-        let new_msgs = chat.db.load_all_messages().await?;
-        let new_users = chat.db.load_all_users().await?;
-        let new_peers = chat.db.load_all_peers().await?;
-        *chat.message_history.write().unwrap() = new_msgs;
+        let merged_users: Vec<User> = users.into_values().collect();
+        let mut peers: HashMap<u64, Peer> = HashMap::new();
+        for p in my_peers.into_iter().chain(in_peers) {
+            if let Some(uid) = p.get_user_id() { peers.entry(uid).or_insert(p); }
+        }
+        let merged_peers: Vec<Peer> = peers.into_values().collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut merged_msgs = Vec::new();
+        for m in my_msgs.into_iter().chain(in_msgs) {
+            if seen.insert((m.get_sender_id(), m.get_sent_at(), m.get_contents())) {
+                let mut nm = Message::new(-1, m.get_sender_id(), m.get_contents());
+                nm.set_date(m.get_sent_at());
+                merged_msgs.push(nm);
+            }
+        }
+        chat.db.save_all_users(merged_users).await?;
+        chat.db.save_all_peers(merged_peers).await?;
+        chat.db.save_all_messages(merged_msgs).await?;
+        *chat.message_history.write().unwrap() = chat.db.load_all_messages().await?;
+        let users_now = chat.db.load_all_users().await?;
         let mut members = chat.members.write().unwrap();
         members.clear();
-        for u in new_users { members.insert(u.get_id(), u); }
-        // Rebuild peermap from the adopted peers, preserving any live streams.
-        let mut guard = self.peers.lock().unwrap();
-        let mut rebuilt: Peermap = HashMap::new();
-        for peer in new_peers {
-            let uid = match peer.get_user_id() { Some(u) => u, None => continue };
-            let key = peer.shrdkeygen(self.prvkey.clone());
-            let stream = guard.get(&uid).and_then(|(_, _, s)| s.clone());
-            rebuilt.insert(uid, (peer, key, stream));
-        }
-        *guard = rebuilt;
+        for u in users_now { members.insert(u.get_id(), u); }
         Ok(())
+    }
+
+    async fn send_db_req(&self, chat: &Chat) -> Result<()> {
+        let admin_id = chat.get_admin();
+        let target: Option<(Key, Arc<TokioMutex<TcpStream>>)> = {
+            let me = self.user.as_ref().map(|(id, _, _)| *id);
+            let guard = self.peers.lock().unwrap();
+            let admin = admin_id
+                .and_then(|aid| guard.get(&aid))
+                .filter(|(p, _, _)| p.is_online())
+                .and_then(|(_, k, s)| s.as_ref().map(|arc| (*k, Arc::clone(arc))));
+            admin.or_else(|| guard.iter()
+                .filter(|(uid, _)| Some(**uid) != me)
+                .filter(|(_, (p, _, _))| p.is_online())
+                .find_map(|(_, (_, k, s))| s.as_ref().map(|arc| (*k, Arc::clone(arc)))))
+        };
+
+        if let Some((key, stream_arc)) = target {
+            let frame = Connection::encode(&key, DBR_HD, ())?;
+            tokio::spawn(async move {
+                let mut s = stream_arc.lock().await;
+                let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
+                let _ = s.write_all(&frame).await;
+            });
+        }
+        Ok(())
+    }
+    async fn read_db_req(&self, chat: &Chat) -> Result<()> {
+        self.send_db_sync(&chat.db).await
     }
 }

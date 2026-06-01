@@ -99,7 +99,9 @@ impl Database {
         }). await?
     }
     /// Message creation
-    pub async fn create_message(&self, sender_id: u64, contents: String) -> Result<Message> {
+    /// Create a message. `sent_at = None` lets the DB stamp now (locally composed);
+    /// `Some(ts)` preserves a received message's original timestamp.
+    pub async fn create_message(&self, sender_id: u64, contents: String, sent_at: Option<i64>) -> Result<Message> {
         let conn = Arc::clone(&self.conn);
         let sender_id_str = sender_id.to_string();
         let contents_clone = contents.clone();
@@ -107,21 +109,31 @@ impl Database {
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
 
-            conn.execute(
-                "INSERT INTO messages (sender_id, contents) VALUES (?1, ?2)",
-                params![sender_id_str, contents_clone],
-            )?;
+            match sent_at {
+                Some(ts) => conn.execute(
+                    "INSERT INTO messages (sender_id, contents, sent_at) VALUES (?1, ?2, ?3)",
+                    params![sender_id_str, contents_clone, ts],
+                )?,
+                None => conn.execute(
+                    "INSERT INTO messages (sender_id, contents) VALUES (?1, ?2)",
+                    params![sender_id_str, contents_clone],
+                )?,
+            };
 
             let message_id = conn.last_insert_rowid() as i32;
             let mut stmt = conn.prepare(
-                "SELECT m.sent_at, u.id, u.name, u.role
+                "SELECT m.sent_at
                  FROM messages m
                  JOIN users u ON m.sender_id = u.id
                  WHERE m.id = ?1"
             )?;
 
-            let message = stmt.query_row(params![message_id], |_| {
-                Ok(Message::new(message_id, sender_id, contents))
+            // Read back the actual sent_at (DB-stamped or preserved) for the returned Message.
+            let message = stmt.query_row(params![message_id], |row| {
+                let actual: i64 = row.get(0)?;
+                let mut m = Message::new(message_id, sender_id, contents);
+                m.set_date(actual);
+                Ok(m)
             })?;
 
             Ok(message)
