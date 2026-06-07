@@ -81,7 +81,61 @@ async fn startstuffold(choice: &str, config: &Config, requests: Requests, token:
     Ok((conn, chat))
 }
 
-//TODO: startstuff new and old for noon-admin members (same user in a new chat gets auto accepted)
+// Member background tasks: same as admin but without hosting the rendezvous —
+// peers don't accept join requests, they just listen, watch their IP, and can
+// take over the rendezvous (fallback) if the holder drops. All cancel via `token`.
+fn member_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, token: CancellationToken) {
+    tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
+    let mc = Arc::clone(conn); let mt = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip() => {} } });
+    let fc = Arc::clone(conn); let ft = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
+}
+
+async fn joinstuffnew(choice: &str, user_name: &str, rendezvous: &str, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
+    if !*ran {
+        return Err(anyhow::anyhow!("joinstuffnew already ran"));
+    }
+    let (addr, listener) = get_free_port().await?;
+    let (chat, prvkey, pubkey, user_id, peer_id, peermap) = Chat::join(choice, user_name, addr.port()).await?;
+    let mut conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
+    conn.set_user(user_id, user_name.to_string(), Uid::getuid());
+    let conn = Arc::new(conn);
+    let chat = Arc::new(chat);
+    member_rcv(&conn, &chat, token); // listen first so we catch the admin's accept (db sync)
+    // Send our join request and wait for the admin to acknowledge receipt.
+    if !conn.snd_requests(user_name.to_string()).await? {
+        return Err(anyhow::anyhow!("join request was not acknowledged"));
+    }
+    *ran = false;
+    Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
+}
+async fn joinstuffold(choice: &str, config: &Config, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>)> {
+    if !*ran {
+        return Err(anyhow::anyhow!("joinstuffold already ran"));
+    }
+    let socket = get_free_port().await?;
+    let prvkey = config.prvkey.as_ref().ok_or_else(|| anyhow::anyhow!("config missing prvkey"))?.clone();
+    let user_name = config.user_name.as_ref().ok_or_else(|| anyhow::anyhow!("config missing user_name"))?.clone();
+    let user_id = config.user_id.ok_or_else(|| anyhow::anyhow!("config missing user_id"))?;
+    let rendezvous = config.rendezvous.ok_or_else(|| anyhow::anyhow!("config missing rendezvous"))?;
+    let uid = Uid::getuid();
+    let pubkey_hex = hex::encode(PublicKey::from(&prvkey).as_bytes());
+    let user = User::new(pubkey_hex.clone(), user_name.clone(), uid);
+    if !user.ver_id(pubkey_hex, user_id) {
+        return Err(anyhow::anyhow!("config identity mismatch (wrong key/name/machine)"));
+    }
+    let (chat, peermap) = Chat::old(choice, &user_name, prvkey.clone()).await?;
+    let mut conn = Connection::new(prvkey, rendezvous, socket, peermap).await;
+    conn.set_user(user_id, user_name.clone(), uid);
+    let conn = Arc::new(conn);
+    let chat = Arc::new(chat);
+    member_rcv(&conn, &chat, token);
+    chat.send_join(&conn).await?;               // tell existing peers we're back
+    let _ = conn.snd_requests(user_name).await; // re-handshake with the rendezvous holder
+    *ran = false;
+    Ok((conn, chat))
+}
 
 // Seqeuence parsing regex
 lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap(); }

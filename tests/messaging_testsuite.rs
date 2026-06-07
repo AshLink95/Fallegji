@@ -123,3 +123,25 @@ async fn test_chat_new_and_old() -> Result<()> {
     let _ = std::fs::remove_file(path);
     Ok(())
 }
+
+/// Chat::join bootstraps a Member (not Admin) with empty history; state arrives later via sync.
+#[tokio::test]
+async fn test_chat_join() -> Result<()> {
+    let path = "j__jointest.db";
+    let _ = std::fs::remove_file(path);
+
+    let (chat, _prv, _pub, user_id, _peer_id, peermap) = Chat::join("jointest", "j", 9100).await?;
+    {
+        let members = chat.members.read().unwrap();
+        assert!(members.contains_key(&user_id), "self is a member");
+        assert!(members.contains_key(&0u64), "sys member");
+    }
+    assert_ne!(chat.current_user.get_role(), Some(Role::Admin), "joiner is not admin");
+    assert!(chat.message_history.read().unwrap().is_empty(), "no history until the admin syncs");
+    assert!(peermap.contains_key(&user_id), "peermap includes self");
+    assert_eq!(chat.current_user.get_id(), user_id, "current user matches returned id");
+    drop(chat);
+
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}

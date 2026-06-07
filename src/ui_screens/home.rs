@@ -389,12 +389,20 @@ macro_rules! home {
                         KeyCode::Enter if $active_section == 0 => {
                             if let Some(chosen) = $chats.available.get($chats.choice) {
                                 $config = Config::load(CONFIG, Some(chosen))?;
-                                $curr_screen = Screen::Chat;
                                 $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
-                                let cc = startstuffold(&$choice, &$config, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
+                                // Resume as host (admin) or as member, per our saved role.
+                                let user_name = $config.user_name.clone().unwrap_or_default();
+                                let users = crate::db::Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
+                                let is_admin = users.iter().any(|u| u.get_name() == user_name && u.get_role() == Some(Role::Admin));
+                                let cc = if is_admin {
+                                    startstuffold(&$choice, &$config, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?
+                                } else {
+                                    joinstuffold(&$choice, &$config, $token.clone(), &mut $run_once).await?
+                                };
                                 $chat_2_delete = None;
                                 $conn = Some(cc.0);
                                 $chat = Some(cc.1);
+                                $curr_screen = Screen::Chat;
                             }
                         }
                         KeyCode::Enter if $active_section == 1 => {
@@ -420,9 +428,18 @@ macro_rules! home {
                             match $active_field {
                                 0 if user_name_valid => $active_field = 1,
                                 1 if rendezvous_valid && user_name_valid => {
+                                    // No chat-name field on join; use the rendezvous as a local
+                                    // handle until the admin's db sync renames things.
+                                    $choice = $rendezvous_input.clone();
+                                    let jc = joinstuffnew(&$choice, &$user_name_input, &$rendezvous_input, $token.clone(), &mut $run_once).await?;
+                                    $conn = Some(jc.0);
+                                    $chat = Some(jc.1);
+                                    let prvkey = jc.2;
+                                    let pubkey = jc.3;
+                                    let user_id = jc.4;
+                                    let peer_id = jc.5;
+                                    $config = Config::save(CONFIG, &$choice, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
                                     $curr_screen = Screen::InitClient;
-                                    //TODO: must establish conn and create chat
-                                    // $user_name_input, $rendezvous_input
                                 }
                                 _ => {}
                             }

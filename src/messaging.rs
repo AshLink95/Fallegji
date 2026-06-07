@@ -73,6 +73,40 @@ impl Chat {
         }, prvkey, pubkey, user_id, peer_id, peermap))
     }
 
+    /// Non-admin joiner: like `new`, but the local user is a Member and there's no
+    /// "created" notice. Real chat state arrives via the admin's DB sync once accepted.
+    pub async fn join(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, PublicKey, u64, i32, Peermap)> {
+        let db_path = format!("{}__{}.db", user_name, chat_name);
+        let db = Database::new(&db_path)?;
+
+        let (peer, prvkey) = db.create_peer(port).await?;
+        let peer_id = peer.get_id();
+        let pubkey = peer.get_pubkey();
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
+
+        let uid = Uid::getuid();
+        let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
+        let user_id = current_user.get_id();
+        db.update_peer_link_user(peer.get_id(), user_id).await?;
+
+        db.delete_user(0).await?;
+        let sys = db.create_sys().await?;
+        let mut members = HashMap::new();
+        members.insert(user_id, current_user.clone());
+        members.insert(0u64, sys);
+
+        let mut peermap = Peermap::new();
+        let self_key = peer.shrdkeygen(prvkey.clone());
+        peermap.insert(user_id, (peer.clone(), self_key, None));
+
+        Ok((Self {
+            message_history: Arc::new(RwLock::new(Vec::new())),
+            members: Arc::new(RwLock::new(members)),
+            current_user,
+            db
+        }, prvkey, pubkey, user_id, peer_id, peermap))
+    }
+
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {
         let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
