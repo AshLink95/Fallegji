@@ -96,13 +96,12 @@ macro_rules! input_handling {
                             $input.insert($cursor_pos, '\n');
                             $cursor_pos += 1;
                         },
-                        KeyCode::Enter => { // NOTE: Specific to this app (TODO: send the message & save to db)
+                        KeyCode::Enter => { // NOTE: Specific to this app
                             if n==0 { n = 1 };
                             for _ in 0..n.min(10) {
                                 if !$input.is_empty() {
                                     let sender_id = $chat.current_user.get_id();
-                                    let message = Message::new(-1, sender_id, $input.clone());
-                                    $chat.message_history.write().unwrap().push(message);
+                                    let _ = $chat.send_message($conn, sender_id, $input.clone()).await;
                                 }
                             }
                             $seq.clear();

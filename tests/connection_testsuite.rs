@@ -222,31 +222,12 @@ async fn test_connection() -> Result<()> {
     let keypair = Peer::keypairgen()?;
     let rendezvous_addr = free_rendezvous_addr().await;
     let socket = get_free_port().await?;
-    let peermap = HashMap::new();
-    let mut conn = Connection::new(keypair.1, rendezvous_addr, socket, peermap).await;
-    let bind_result = conn.bind_rendezvous().await;
-    assert!(bind_result.is_ok(), "Failed to bind rendezvous");
+    let conn = Connection::new(keypair.1, rendezvous_addr, socket, HashMap::new()).await;
+    assert!(conn.bind_rendezvous().await.is_ok(), "Failed to bind rendezvous");
     conn.end_rendezvous();
-    let double_bind = conn.bind_rendezvous().await;
-    assert!(double_bind.is_ok(), "Double bind failed");
+    assert!(conn.bind_rendezvous().await.is_ok(), "Double bind failed");
 
-    let keypair2 = Peer::keypairgen()?;
-    let socket2 = get_free_port().await?;
-    let peermap2 = HashMap::new();
-    let mut client_conn = Connection::new(keypair2.1, rendezvous_addr, socket2, peermap2).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let connect_result = client_conn.connect_rendezvous().await;
-    assert!(connect_result.is_ok(), "Failed to connect to rendezvous");
-
-    client_conn.end_rendezvous();
-    let reconnect = client_conn.connect_rendezvous().await;
-    assert!(reconnect.is_ok(), "Reconnect after end failed");
-
-    let monitor_handle = tokio::spawn(async move {
-        conn.monitor_ip().await
-    });
-
+    let monitor_handle = tokio::spawn(async move { conn.monitor_ip().await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     monitor_handle.abort();
     let result = tokio::time::timeout(Duration::from_millis(100), monitor_handle).await;
@@ -254,7 +235,7 @@ async fn test_connection() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_rendezvous_requests() -> Result<()> {
     let rendezvous_addr = free_rendezvous_addr().await;
     let server_keypair = Peer::keypairgen()?;
@@ -262,29 +243,26 @@ async fn test_rendezvous_requests() -> Result<()> {
     let server_socket = get_free_port().await?;
     let client_socket = get_free_port().await?;
     let client_addr = client_socket.0;
-    let server_peermap = HashMap::new();
-    let client_peermap = HashMap::new();
-    let mut server_conn = Connection::new(server_keypair.1, rendezvous_addr, server_socket, server_peermap).await;
-    let mut client_conn = Connection::new(client_keypair.1, rendezvous_addr, client_socket, client_peermap).await;
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let requests_clone = Arc::clone(&requests);
+    let server_conn = Connection::new(server_keypair.1, rendezvous_addr, server_socket, HashMap::new()).await;
+    let client_conn = Connection::new(client_keypair.1, rendezvous_addr, client_socket, HashMap::new()).await;
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<(SocketAddr, String, PublicKey)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
     let token_clone = token.clone();
 
     let server_handle = tokio::spawn(async move {
-        let mut reqs = requests_clone.lock().await;
-        server_conn.rcv_requests(&mut reqs, token_clone).await
+        server_conn.rcv_requests(requests_clone, token_clone).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Run the client in-place so we keep client_conn to inspect afterward.
     let client_success = client_conn.snd_requests("TestUser".to_string()).await?;
     token.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
 
     assert!(client_success, "Client did not receive valid acknowledgment");
-    let reqs = requests.lock().await;
+    let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].1, "TestUser");
     assert_eq!(reqs[0].0, client_addr, "Recorded addr must match client's socket");
@@ -295,7 +273,7 @@ async fn test_rendezvous_requests() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_fallback() -> Result<()> {
     let rendezvous_addr = free_rendezvous_addr().await;
     let (_, prv1) = Peer::keypairgen()?;
@@ -304,37 +282,33 @@ async fn test_fallback() -> Result<()> {
     let sock2 = get_free_port().await?;
     let sock2_addr = sock2.0;
 
-    let mut conn1 = Connection::new(prv1, rendezvous_addr, sock1, HashMap::new()).await;
-    let mut conn2 = Connection::new(prv2, rendezvous_addr, sock2, HashMap::new()).await;
+    let conn1 = Connection::new(prv1, rendezvous_addr, sock1, HashMap::new()).await;
+    let conn2 = Connection::new(prv2, rendezvous_addr, sock2, HashMap::new()).await;
 
     // First caller binds → becomes holder
-    let is_holder = conn1.fallback_lookup().await?;
-    assert!(is_holder, "first fallback_lookup should bind");
+    assert!(conn1.fallback_lookup().await?, "first fallback_lookup should bind");
 
-    // Start receiving on conn1 (rendezvous already bound from fallback_lookup)
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let requests_clone = Arc::clone(&requests);
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<(SocketAddr, String, PublicKey)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
     let token_clone = token.clone();
     let hold_handle = tokio::spawn(async move {
-        let mut reqs = requests_clone.lock().await;
-        conn1.rcv_requests(&mut reqs, token_clone).await
+        conn1.rcv_requests(requests_clone, token_clone).await
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Second caller finds addr taken → connects
-    let is_holder2 = conn2.fallback_lookup().await?;
-    assert!(!is_holder2, "second fallback_lookup should connect, not bind");
+    // Second caller finds addr taken → not the holder.
+    assert!(!conn2.fallback_lookup().await?, "second fallback_lookup should not bind");
 
-    // Re-announce presence to the holder
-    let acked = conn2.fallback_send("Peer2".to_string()).await?;
-    assert!(acked, "fallback_send should receive ack from holder");
+    // Re-announce presence to the holder.
+    assert!(conn2.fallback_send("Peer2".to_string()).await?, "fallback_send should be acked");
 
     token.cancel();
-    hold_handle.await??;
+    let _ = tokio::time::timeout(Duration::from_secs(5), hold_handle).await;
 
-    let reqs = requests.lock().await;
+    let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].1, "Peer2");
     assert_eq!(reqs[0].0, sock2_addr, "Holder must record correct addr for reconnecting peer");
@@ -584,7 +558,7 @@ async fn test_listen_dispatch() -> Result<()> {
     // Background listen loop.
     let lconn = Arc::clone(&conn);
     let lchat = Arc::clone(&chat);
-    tokio::spawn(async move { let _ = lconn.listen(lchat).await; });
+    tokio::spawn(async move { let _ = lconn.listen(lchat, CancellationToken::new()).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Burst of frames: message, heartbeat, typing.

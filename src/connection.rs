@@ -37,13 +37,14 @@ pub trait KeyGen {
 
 /// user_id -> peer, key, socket
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
-enum RendezVousSocket { Listner(TcpListener), Streamer(TcpStream) }
+/// Pending join requests awaiting admin accept/reject: (addr, name, pubkey).
+pub type Requests = Arc<Mutex<Vec<(SocketAddr, String, PublicKey)>>>;
 
 pub struct Connection {
     prvkey: StaticSecret,
-    socket: (SocketAddr, TcpListener),
+    socket: Mutex<(SocketAddr, Arc<TcpListener>)>,
     peers: Arc<Mutex<Peermap>>,
-    rendezvous: (SocketAddr, Option<RendezVousSocket>),
+    rendezvous: (SocketAddr, Mutex<Option<Arc<TcpListener>>>),
     user: Option<(u64, String, Uid)>,
 }
 
@@ -63,25 +64,26 @@ pub trait RendezVous {
     /// onto `requests` (the accept/reject queue), and reply with the admin's own pubkey so
     /// the newcomer can immediately derive a shared key and treat the admin as its sole peer
     /// while it waits to be accepted or refused. Cancelable via `token`.
-    async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String, PublicKey)>, token: CancellationToken) -> Result<()>;
+    async fn rcv_requests(&self, requests: Requests, token: CancellationToken) -> Result<()>;
     /// Newcomer-side handshake initiator. Connects to the rendezvous addr and sends its
     /// `name` + addr + pubkey. Receives the admin's pubkey in response, derives the shared
     /// key, and registers the admin as its only peer — then waits for the admin's accept/refuse.
     /// Returns true once the admin acknowledges the request.
-    async fn snd_requests(&mut self, name: String) -> Result<bool>;
+    async fn snd_requests(&self, name: String) -> Result<bool>;
 
     /// Try to become the new rendezvous holder. If address is taken, connect instead.
     /// Returns true if we bound (became holder), false if we connected.
-    async fn fallback_lookup(&mut self) -> Result<bool>;
+    async fn fallback_lookup(&self) -> Result<bool>;
     /// Re-announce presence to rendezvous holder so they can accept_peer and update our info.
-    async fn fallback_send(&mut self, name: String) -> Result<bool>;
+    async fn fallback_send(&self, name: String) -> Result<bool>;
 }
 
 /// direct communication, keepalive checking and typing (default mode)
 #[allow(async_fn_in_trait)]
 pub trait Communication {
     /// Accept inbound connections on our bound socket and dispatch decrypted packets.
-    async fn listen(self: Arc<Self>, chat: Arc<Chat>) -> Result<()>;
+    /// Stops the accept loop and every per-connection reader when `token` is cancelled.
+    async fn listen(self: Arc<Self>, chat: Arc<Chat>, token: CancellationToken) -> Result<()>;
 
     async fn send_newpeer(&self, addr: SocketAddr, pubkey: PublicKey, db: &Database) -> Result<()>;
     async fn read_newpeer(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
@@ -229,9 +231,9 @@ impl Connection {
     pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr, socket: (SocketAddr, TcpListener), peermap: Peermap) -> Self {
         Self {
             prvkey,
-            socket,
+            socket: Mutex::new((socket.0, Arc::new(socket.1))),
             peers: Arc::new(Mutex::new(peermap)),
-            rendezvous: (rendezvous_addr, None),
+            rendezvous: (rendezvous_addr, Mutex::new(None)),
             user: None,
         }
     }
@@ -240,40 +242,57 @@ impl Connection {
         self.user = Some((user_id, name, uid));
     }
 
-    pub async fn monitor_ip(&mut self) -> Result<()> { // bg task
+    pub async fn monitor_ip(&self) -> Result<()> { // bg task: rebind + re-announce on address change
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
-            let curr_ip = self.socket.0.ip();
+            let curr_ip = self.socket.lock().unwrap().0.ip();
             let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
             tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
             let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
 
             if ip != curr_ip {
                 let addr = SocketAddr::new(ip, 1952);
-                self.socket.0 = addr;
-                self.socket.1 = TcpListener::bind(&addr).await?;
+                let listener = TcpListener::bind(&addr).await?;
+                *self.socket.lock().unwrap() = (addr, Arc::new(listener));
+                let name = self.user.as_ref().map(|u| u.1.clone()).unwrap_or_default();
+                let _ = self.fallback_send(name).await;
             }
         }
     }
 
-    pub async fn bind_rendezvous(&mut self) -> Result<()> {
-        if self.rendezvous.1.is_none() {
-            self.rendezvous.1 = Some(RendezVousSocket::Listner(TcpListener::bind(&self.rendezvous.0).await?))
-        };
+    pub async fn bind_rendezvous(&self) -> Result<()> {
+        let bound = self.rendezvous.1.lock().unwrap().is_some();
+        if !bound {
+            let listener = Arc::new(TcpListener::bind(&self.rendezvous.0).await?);
+            *self.rendezvous.1.lock().unwrap() = Some(listener);
+        }
         Ok(())
     }
 
-    pub async fn connect_rendezvous(&mut self) -> Result<()> {
-        if self.rendezvous.1.is_none() {
-            self.rendezvous.1 = Some(RendezVousSocket::Streamer(TcpStream::connect(&self.rendezvous.0).await?))
-        };
-        Ok(())
+    pub fn end_rendezvous(&self) { *self.rendezvous.1.lock().unwrap() = None; }
+
+    /// True if any peer has sent a heartbeat recently.
+    fn any_peer_online(&self) -> bool {
+        self.peers.lock().unwrap().values().any(|(p, _, _)| p.is_online())
     }
 
-    pub fn end_rendezvous(&mut self) { self.rendezvous.1 = None; }
+    /// bg task: if no peer is reachable, try to become the rendezvous holder; if the
+    /// address is already taken, re-announce ourselves to whoever holds it.
+    pub async fn fallback(&self) -> Result<()> {
+        let name = self.user.as_ref().map(|u| u.1.clone()).unwrap_or_default();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if self.any_peer_online() { continue; }
+            match self.fallback_lookup().await {
+                Ok(true) => {}
+                Ok(false) => { let _ = self.fallback_send(name.clone()).await; }
+                Err(_) => {}
+            }
+        }
+    }
 
-    pub fn get_addr(&self) -> SocketAddr { self.socket.0 }
+    pub fn get_addr(&self) -> SocketAddr { self.socket.lock().unwrap().0 }
 
     pub fn get_peer(&self, user_id: &u64) -> Option<Peer> {
         if let Some(peer_entry) = self.peers.lock().unwrap().get(user_id) {
@@ -324,10 +343,11 @@ impl Secrecy for Connection {
 }
 
 impl RendezVous for Connection {
-    async fn rcv_requests(&mut self, requests: &mut Vec<(SocketAddr, String, PublicKey)>, token: CancellationToken) -> Result<()> {
+    async fn rcv_requests(&self, requests: Requests, token: CancellationToken) -> Result<()> {
         self.bind_rendezvous().await?;
+        let listener = self.rendezvous.1.lock().unwrap().clone();
 
-        if let Some(RendezVousSocket::Listner(listener)) = &self.rendezvous.1 {
+        if let Some(listener) = listener {
             loop {
                 tokio::select! {
                     _ = token.cancelled() => { break; }
@@ -366,7 +386,7 @@ impl RendezVous for Connection {
                                             Ok(a) => a,
                                             Err(_) => continue,
                                         };
-                                        requests.push((addr, String::from(name), pubkey));
+                                        requests.lock().unwrap().push((addr, String::from(name), pubkey));
                                         let admin_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
                                         let reply = format!("received[({}, {})]{}fallegji", addr_str, name, admin_pubkey_hex);
                                         let _ = stream.write_all(reply.as_bytes()).await;
@@ -384,119 +404,110 @@ impl RendezVous for Connection {
         Ok(())
     }
 
-    async fn snd_requests(&mut self, name: String) -> Result<bool> {
-        self.connect_rendezvous().await?;
-
+    async fn snd_requests(&self, name: String) -> Result<bool> {
         let prvkey = self.prvkey.clone();
         let peers = Arc::clone(&self.peers);
         let admin_addr = self.rendezvous.0;
+        let my_addr = self.socket.lock().unwrap().0;
 
-        if let Some(RendezVousSocket::Streamer(stream)) = &mut self.rendezvous.1 {
-            let my_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
-            let request = format!("{}[{}]{}fallegji", name, self.socket.0, my_pubkey_hex);
-            stream.write_all(request.as_bytes()).await?;
-            let timeout = tokio::time::Duration::from_secs(5);
-            let start_time = tokio::time::Instant::now();
-            let mut buffer = vec![0u8; 4096];
-            loop {
-                if start_time.elapsed() > timeout { return Ok(false); }
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(500),
-                    stream.read(&mut buffer)
-                ).await {
-                    Ok(Ok(n)) if n > 0 => {
-                        let repl = String::from_utf8_lossy(&buffer[..n]);
-                        let start = match repl.find('[') {
-                            Some(s) => s,
+        let mut stream = TcpStream::connect(&admin_addr).await?;
+        let my_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
+        let request = format!("{}[{}]{}fallegji", name, my_addr, my_pubkey_hex);
+        stream.write_all(request.as_bytes()).await?;
+        let timeout = tokio::time::Duration::from_secs(5);
+        let start_time = tokio::time::Instant::now();
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            if start_time.elapsed() > timeout { return Ok(false); }
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                stream.read(&mut buffer)
+            ).await {
+                Ok(Ok(n)) if n > 0 => {
+                    let repl = String::from_utf8_lossy(&buffer[..n]);
+                    let start = match repl.find('[') { Some(s) => s, None => continue };
+                    let end = match repl.find(']') { Some(e) => e, None => continue };
+                    if start >= end { continue; }
+                    let prefix = &repl[..start];
+                    let tuple_content = &repl[start+1..end];
+                    let admin_pubkey_hex = match repl[end+1..].trim().strip_suffix("fallegji") {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    if prefix != "received" { continue; }
+                    if !tuple_content.starts_with('(') || !tuple_content.ends_with(')') { continue; }
+                    let inner = &tuple_content[1..tuple_content.len()-1];
+                    let parts: Vec<&str> = inner.splitn(2, ", ").collect();
+                    if parts.len() != 2 { continue; }
+                    if parts[0] == my_addr.to_string() && parts[1] == name {
+                        let admin_pubkey = match hex::decode(admin_pubkey_hex)
+                            .ok()
+                            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                            .map(PublicKey::from)
+                        {
+                            Some(pk) => pk,
                             None => continue,
                         };
-                        let end = match repl.find(']') {
-                            Some(e) => e,
-                            None => continue,
+                        let admin_peer = Peer {
+                            id: -1, user_id: None, addr: admin_addr, pubkey: admin_pubkey,
+                            last_heartbeat: None, last_seen_typing: None
                         };
-                        if start >= end { continue; }
-                        let prefix = &repl[..start];
-                        let tuple_content = &repl[start+1..end];
-                        // tail = {admin_pubkey_hex}fallegji
-                        let admin_pubkey_hex = match repl[end+1..].trim().strip_suffix("fallegji") {
-                            Some(p) => p,
-                            None => continue,
-                        };
-                        if prefix != "received" { continue; }
-                        if !tuple_content.starts_with('(') || !tuple_content.ends_with(')') {
-                            continue;
-                        }
-                        let inner = &tuple_content[1..tuple_content.len()-1];
-                        let parts: Vec<&str> = inner.splitn(2, ", ").collect();
-                        if parts.len() != 2 { continue; }
-                        let received_addr = parts[0];
-                        let received_name = parts[1];
-                        if received_addr == self.socket.0.to_string() && received_name == name {
-                            let admin_pubkey = match hex::decode(admin_pubkey_hex)
-                                .ok()
-                                .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                                .map(PublicKey::from)
-                            {
-                                Some(pk) => pk,
-                                None => continue,
-                            };
-                            let admin_peer = Peer {
-                                id: -1, user_id: None, addr: admin_addr,  pubkey: admin_pubkey,
-                                last_heartbeat: None, last_seen_typing: None
-                            };
-                            let key = admin_peer.shrdkeygen(prvkey.clone());
-                            peers.lock().unwrap().insert(0, (admin_peer, key, None));
-                            return Ok(true);
-                        }
-                        continue;
+                        let key = admin_peer.shrdkeygen(prvkey.clone());
+                        peers.lock().unwrap().insert(0, (admin_peer, key, None));
+                        return Ok(true);
                     }
-                    Ok(Ok(_)) => {
-                        return Ok(false);
-                    }
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => {
-                        continue;
-                    }
+                    continue;
                 }
+                Ok(Ok(_)) => return Ok(false),
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => continue,
             }
         }
-
-        Ok(false)
     }
 
-    async fn fallback_lookup(&mut self) -> Result<bool> {
+    async fn fallback_lookup(&self) -> Result<bool> {
         match TcpListener::bind(&self.rendezvous.0).await {
             Ok(listener) => {
-                self.rendezvous.1 = Some(RendezVousSocket::Listner(listener));
+                *self.rendezvous.1.lock().unwrap() = Some(Arc::new(listener));
                 Ok(true)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                self.connect_rendezvous().await?;
-                Ok(false)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn fallback_send(&mut self, name: String) -> Result<bool> {
+    async fn fallback_send(&self, name: String) -> Result<bool> {
         self.snd_requests(name).await
     }
 }
 
 impl Communication for Connection {
-    async fn listen(self: Arc<Self>, chat: Arc<Chat>) -> Result<()> {
+    async fn listen(self: Arc<Self>, chat: Arc<Chat>, token: CancellationToken) -> Result<()> {
         loop {
-            let (mut stream, _) = self.socket.1.accept().await?;
+            let listener = self.socket.lock().unwrap().1.clone();
+            let (mut stream, _) = tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                res = listener.accept() => res?,
+            };
             let me = Arc::clone(&self);
             let chat = Arc::clone(&chat);
+            let conn_token = token.clone();
             tokio::spawn(async move {
                 let mut peer_key: Option<(u64, Key)> = None;
                 loop {
                     let mut len_buf = [0u8; 4];
-                    if stream.read_exact(&mut len_buf).await.is_err() { break; }
+                    let read_len = tokio::select! {
+                        _ = conn_token.cancelled() => break,
+                        r = stream.read_exact(&mut len_buf) => r,
+                    };
+                    if read_len.is_err() { break; }
                     let len = u32::from_be_bytes(len_buf) as usize;
                     let mut frame = vec![0u8; len];
-                    if stream.read_exact(&mut frame).await.is_err() { break; }
+                    let read_frame = tokio::select! {
+                        _ = conn_token.cancelled() => break,
+                        r = stream.read_exact(&mut frame) => r,
+                    };
+                    if read_frame.is_err() { break; }
 
                     let (peer_id, header, payload) = if let Some((pid, key)) = peer_key {
                         match Connection::decode(&key, &frame) {
@@ -563,7 +574,7 @@ impl Communication for Connection {
             }
             if let Some(my_id) = me {
                 let me_peer = Peer {
-                    id: -1, user_id: Some(my_id), addr: self.socket.0,
+                    id: -1, user_id: Some(my_id), addr: self.socket.lock().unwrap().0,
                     pubkey: PublicKey::from(&self.prvkey), last_heartbeat: None, last_seen_typing: None
                 };
                 let me_key = me_peer.shrdkeygen(self.prvkey.clone());

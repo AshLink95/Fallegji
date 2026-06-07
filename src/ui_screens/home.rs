@@ -12,7 +12,7 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident) => {
         // Validity checks
         let combo_exists = !$chat_name_input.is_empty() && !$user_name_input.is_empty() &&
             $chats.available.contains(&format!("{} @ {}", $user_name_input, $chat_name_input));
@@ -391,7 +391,7 @@ macro_rules! home {
                                 $config = Config::load(CONFIG, Some(chosen))?;
                                 $curr_screen = Screen::Chat;
                                 $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
-                                let cc = startstuffold(&$choice, &$config, &mut $run_once).await?;
+                                let cc = startstuffold(&$choice, &$config, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
                                 $chat_2_delete = None;
                                 $conn = Some(cc.0);
                                 $chat = Some(cc.1);
@@ -403,7 +403,7 @@ macro_rules! home {
                                 1 if user_name_valid => $active_field = 2,
                                 2 if rendezvous_valid && chat_name_valid && user_name_valid => {
                                     $choice = $chat_name_input.clone();
-                                    let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, &mut $run_once).await?;
+                                    let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
                                     $conn = Some(ccppup.0);
                                     $chat = Some(ccppup.1);
                                     let prvkey = ccppup.2;

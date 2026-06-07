@@ -16,39 +16,67 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::{Connection, get_free_port}, messaging::{Message, Chat}, auth::Role, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Connection, Communication, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
 
 use x25519_dalek::{PublicKey, StaticSecret};
-// use tokio_util::sync::CancellationToken;
+use tokio_util::sync::CancellationToken;
 
 // admin initialization functions
-async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, ran: &mut bool) -> Result<(Connection, Chat, StaticSecret, PublicKey, u64, i32)> {
+type Requests = Arc<Mutex<Vec<(SocketAddr, String, PublicKey)>>>;
+
+// Admin background tasks: accept direct peer connections, watch our IP, hold the
+// rendezvous (fallback), and read incoming join requests. All cancel via `token`.
+fn admin_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, requests: Requests, token: CancellationToken) {
+    tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
+    let mc = Arc::clone(conn); let mt = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip() => {} } });
+    let fc = Arc::clone(conn); let ft = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
+    let rc = Arc::clone(conn);
+    tokio::spawn(async move { let _ = rc.rcv_requests(requests, token).await; });
+}
+
+async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, requests: Requests, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
     if !*ran {
         return Err(anyhow::anyhow!("startstuffnew already ran"));
     }
     let (addr, listener) = get_free_port().await?;
     let (chat, prvkey, pubkey, user_id, peer_id, peermap) = Chat::new(choice, user_name, addr.port()).await?;
-    let conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
-    //TODO: start listening for requests
-
+    let mut conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
+    conn.set_user(user_id, user_name.to_string(), Uid::getuid());
+    conn.bind_rendezvous().await?;
+    let conn = Arc::new(conn);
+    let chat = Arc::new(chat);
+    admin_rcv(&conn, &chat, requests, token);
     *ran = false;
     Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
 }
-async fn startstuffold(choice: &str, config: &Config, ran: &mut bool) -> Result<(Connection, Chat)> {
+async fn startstuffold(choice: &str, config: &Config, requests: Requests, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>)> {
     if !*ran {
         return Err(anyhow::anyhow!("startstuffold already ran"));
     }
-    //TODO: generate user from key and uid then check with ver_id
     let socket = get_free_port().await?;
-    let prvkey = config.prvkey.as_ref().unwrap().clone();
-    let (chat, peermap) = Chat::old(choice, config.user_name.as_ref().unwrap(), prvkey.clone()).await?;
-    let conn = Connection::new(prvkey, config.rendezvous.unwrap(), socket, peermap).await;
+    let prvkey = config.prvkey.as_ref().ok_or_else(|| anyhow::anyhow!("config missing prvkey"))?.clone();
+    let user_name = config.user_name.as_ref().ok_or_else(|| anyhow::anyhow!("config missing user_name"))?.clone();
+    let user_id = config.user_id.ok_or_else(|| anyhow::anyhow!("config missing user_id"))?;
+    let rendezvous = config.rendezvous.ok_or_else(|| anyhow::anyhow!("config missing rendezvous"))?;
+    let uid = Uid::getuid();
+    let pubkey_hex = hex::encode(PublicKey::from(&prvkey).as_bytes());
+    let user = User::new(pubkey_hex.clone(), user_name.clone(), uid);
+    if !user.ver_id(pubkey_hex, user_id) {
+        return Err(anyhow::anyhow!("config identity mismatch (wrong key/name/machine)"));
+    }
+    let (chat, peermap) = Chat::old(choice, &user_name, prvkey.clone()).await?;
+    let mut conn = Connection::new(prvkey, rendezvous, socket, peermap).await;
+    conn.set_user(user_id, user_name, uid);
+    conn.bind_rendezvous().await?;
+    let conn = Arc::new(conn);
+    let chat = Arc::new(chat);
     chat.send_join(&conn).await?;
-    //TODO: start listening for requests
-
+    admin_rcv(&conn, &chat, requests, token);
     *ran = false;
     Ok((conn, chat))
 }
@@ -90,10 +118,11 @@ pub async fn app() -> Result<()> {
     let mut rendezvous_input = String::new();
     let mut chat_2_delete: Option<usize> = None;
 
-    // App meat: Connection and Chat
-    let mut conn: Option<Connection> = None;
-    let mut chat: Option<Chat> = None;
+    // App meat: Connection and Chat (shared with the spawned admin tasks)
+    let mut conn: Option<Arc<Connection>> = None;
+    let mut chat: Option<Arc<Chat>> = None;
     let mut run_once: bool = true;
+    let mut token = CancellationToken::new();
 
     // Admin rendezvous state
     let mut admin_active_section = 2;
@@ -116,7 +145,14 @@ pub async fn app() -> Result<()> {
     #[allow(clippy::collapsible_match)] //TODO: refactor to match
     loop {
         if curr_screen == Screen::Home {
-            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once);
+            // Leaving a live session: cancel its background tasks and drop handles.
+            if conn.is_some() {
+                token.cancel();
+                token = CancellationToken::new();
+            }
+            conn = None;
+            chat = None;
+            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once, requests, token);
         } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
             initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
