@@ -392,7 +392,7 @@ macro_rules! home {
                                 $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
                                 // Resume as host (admin) or as member, per our saved role.
                                 let user_name = $config.user_name.clone().unwrap_or_default();
-                                let users = crate::db::Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
+                                let users = Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
                                 let is_admin = users.iter().any(|u| u.get_name() == user_name && u.get_role() == Some(Role::Admin));
                                 let cc = if is_admin {
                                     startstuffold(&$choice, &$config, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?

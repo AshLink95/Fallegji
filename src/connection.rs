@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::{UdpSocket, SocketAddr}, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, net::{UdpSocket, SocketAddr, IpAddr, Ipv4Addr}, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH, Duration}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use sha2::Sha256;
@@ -23,10 +23,43 @@ const NWP_HD: u8 = 0xA6;
 pub struct Peer {
     id: i32,
     user_id: Option<u64>, // Users get created after peers
-    addr: SocketAddr,
+    addrs: [SocketAddr; 3], // [localhost, pre-NAT (LAN), post-NAT (public)]
     pubkey: PublicKey,
     last_heartbeat: Option<i64>,
     last_seen_typing: Option<i64>
+}
+
+/// This machine's three candidate addresses for `port`: loopback, LAN (UDP trick),
+/// and public (defaults to LAN until STUN refines it — see `public_addr`).
+pub fn local_addrs(port: u16) -> Result<[SocketAddr; 3]> {
+    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+    let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+    let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let lan = SocketAddr::new(lan_ip, port);
+    Ok([localhost, lan, lan])
+}
+
+/// Discover our public (post-NAT) IP via icanhazip.com over plain HTTP (no TLS dep).
+/// Returns just the IP — pair it with the local port (assumes a port-preserving NAT).
+pub async fn public_ip() -> Result<IpAddr> {
+    let mut stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect("icanhazip.com:80")).await??;
+    stream.write_all(b"GET / HTTP/1.0\r\nHost: icanhazip.com\r\nConnection: close\r\n\r\n").await?;
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await??;
+    let text = String::from_utf8_lossy(&buf);
+    let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    body.trim().parse::<IpAddr>().context("icanhazip: response was not an IP")
+}
+
+/// Try each candidate address in turn, returning the first that connects.
+pub async fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
+    for addr in addrs {
+        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await {
+            return Some(stream);
+        }
+    }
+    None
 }
 
 /// key generation
@@ -38,7 +71,7 @@ pub trait KeyGen {
 /// user_id -> peer, key, socket
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
 /// Pending join requests awaiting admin accept/reject: (addr, name, pubkey).
-pub type Requests = Arc<Mutex<Vec<(SocketAddr, String, PublicKey)>>>;
+pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>>;
 
 pub struct Connection {
     prvkey: StaticSecret,
@@ -85,7 +118,7 @@ pub trait Communication {
     /// Stops the accept loop and every per-connection reader when `token` is cancelled.
     async fn listen(self: Arc<Self>, chat: Arc<Chat>, token: CancellationToken) -> Result<()>;
 
-    async fn send_newpeer(&self, addr: SocketAddr, pubkey: PublicKey, db: &Database) -> Result<()>;
+    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, db: &Database) -> Result<()>;
     async fn read_newpeer(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
 
     async fn send_msg(&self, msg: Message) -> Result<()>;
@@ -105,19 +138,14 @@ pub trait Communication {
 }
 
 impl Peer {
-    /// new created peer
+    /// new created peer (loopback + LAN; public defaults to LAN until STUN refines it)
     pub fn new_out(id: i32, port: u16) -> Result<(Self, StaticSecret)> {
-        // using UDP trick to get appropriate network IP peers can use
-        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-        tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-        let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-        let addr = SocketAddr::new(ip, port);
-
+        let addrs = local_addrs(port)?;
         let keypair = Self::keypairgen()?;
         Ok(( Self {
             id,
             user_id: None,
-            addr,
+            addrs,
             pubkey: keypair.0,
             last_heartbeat: None,
             last_seen_typing: None
@@ -125,13 +153,27 @@ impl Peer {
     }
 
     /// new imported peer
-    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addr: SocketAddr, pubkey: PublicKey, last_seen_typing: Option<i64>, last_heartbeat: Option<i64>) -> Result<Self> {
+    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addrs: [SocketAddr; 3], pubkey: PublicKey, last_seen_typing: Option<i64>, last_heartbeat: Option<i64>) -> Result<Self> {
         let key: String = pubkey.encode_hex();
         let user = User::new(key.clone(), peer_name.clone(), peer_uid);
         if user.ver_id(key, peer_user_id) {
-            Ok(Self {id, user_id: Some(peer_user_id), addr, pubkey, last_heartbeat, last_seen_typing})
+            Ok(Self {id, user_id: Some(peer_user_id), addrs, pubkey, last_heartbeat, last_seen_typing})
         } else {
             Err(Error::msg("Invalid key or user"))
+        }
+    }
+
+    /// Serialize the 3 addresses for the db (`addr` column) and the wire.
+    pub fn addrs_string(&self) -> String {
+        self.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+    }
+    /// Parse 3 comma-joined addresses; falls back to repeating a single one.
+    pub fn parse_addrs(s: &str) -> Option<[SocketAddr; 3]> {
+        let v: Vec<SocketAddr> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        match v.len() {
+            3 => Some([v[0], v[1], v[2]]),
+            1 => Some([v[0], v[0], v[0]]),
+            _ => None,
         }
     }
 
@@ -157,7 +199,8 @@ impl Peer {
 
     pub fn get_id(&self) -> i32 { self.id }
     pub fn get_user_id(&self) -> Option<u64> { self.user_id }
-    pub fn get_addr(&self) -> SocketAddr { self.addr }
+    pub fn get_addrs(&self) -> [SocketAddr; 3] { self.addrs }
+    pub fn get_addr(&self) -> SocketAddr { self.addrs[1] } // the LAN one, for display/back-compat
     pub fn get_pubkey(&self) -> PublicKey { self.pubkey }
     pub fn get_last_heartbeat(&self) -> Option<i64> { self.last_heartbeat }
     pub fn get_last_seen_typing(&self) -> Option<i64> { self.last_seen_typing }
@@ -175,7 +218,7 @@ impl Peer {
         self.user_id = Some(user_id);
         Ok(())
     }
-    pub fn set_addr(&mut self, addr: SocketAddr) { self.addr = addr }
+    pub fn set_addrs(&mut self, addrs: [SocketAddr; 3]) { self.addrs = addrs }
     pub fn set_last_seen_typing(&mut self, last_seen_typing: Option<i64>) {
         self.last_seen_typing = last_seen_typing;
     }
@@ -242,22 +285,53 @@ impl Connection {
         self.user = Some((user_id, name, uid));
     }
 
-    pub async fn monitor_ip(&self) -> Result<()> { // bg task: rebind + re-announce on address change
+    pub async fn monitor_ip(&self, db: Database) -> Result<()> { // bg task
         loop {
+            let _ = self.refresh_addrs(&db).await; // refresh now (fetches public IP), then every 30s
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    }
 
-            let curr_ip = self.socket.lock().unwrap().0.ip();
-            let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-            tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-            let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+    /// One refresh pass: recompute our 3 addresses (LAN via UDP trick, public via
+    /// icanhazip), rebind on the same port if the LAN ip moved, update our own peer
+    /// in the peermap, persist it to the db, and re-announce on change.
+    pub async fn refresh_addrs(&self, db: &Database) -> Result<()> {
+        let (curr_ip, port) = { let g = self.socket.lock().unwrap(); (g.0.ip(), g.0.port()) };
+        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+        tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+        let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+        let public = public_ip().await.ok().map(|ip| SocketAddr::new(ip, port)); // best-effort
 
-            if ip != curr_ip {
-                let addr = SocketAddr::new(ip, 1952);
-                let listener = TcpListener::bind(&addr).await?;
-                *self.socket.lock().unwrap() = (addr, Arc::new(listener));
-                let name = self.user.as_ref().map(|u| u.1.clone()).unwrap_or_default();
-                let _ = self.fallback_send(name).await;
+        if lan_ip != curr_ip {
+            let addr = SocketAddr::new(lan_ip, port); // keep the chosen port
+            let listener = TcpListener::bind(&addr).await?;
+            *self.socket.lock().unwrap() = (addr, Arc::new(listener));
+        }
+
+        let lan = SocketAddr::new(lan_ip, port);
+        let addrs = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), lan, public.unwrap_or(lan)];
+        if let Some(my_id) = self.user.as_ref().map(|u| u.0) {
+            let db_id = {
+                let mut guard = self.peers.lock().unwrap();
+                guard.get_mut(&my_id).map(|e| { e.0.set_addrs(addrs); e.0.get_id() })
+            };
+            if let Some(id) = db_id {
+                let _ = db.update_peer_addrs(id, addrs).await;
             }
+        }
+
+        if lan_ip != curr_ip {
+            let name = self.user.as_ref().map(|u| u.1.clone()).unwrap_or_default();
+            let _ = self.fallback_send(name).await;
+        }
+        Ok(())
+    }
+
+    /// bg task: broadcast a keep-alive to peers once a second.
+    pub async fn heartbeat_loop(&self) -> Result<()> {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = self.send_heartbeat().await;
         }
     }
 
@@ -293,6 +367,16 @@ impl Connection {
     }
 
     pub fn get_addr(&self) -> SocketAddr { self.socket.lock().unwrap().0 }
+
+    /// Our own 3 candidate addresses for the current bind port (public defaults to
+    /// LAN; `monitor_ip` refines it via STUN and re-announces).
+    fn my_addrs(&self) -> [SocketAddr; 3] {
+        let a = self.socket.lock().unwrap().0;
+        [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a, a]
+    }
+    fn my_addrs_string(&self) -> String {
+        self.my_addrs().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+    }
 
     pub fn get_peer(&self, user_id: &u64) -> Option<Peer> {
         if let Some(peer_entry) = self.peers.lock().unwrap().get(user_id) {
@@ -382,11 +466,11 @@ impl RendezVous for Connection {
                                             Some(pk) => pk,
                                             None => continue,
                                         };
-                                        let addr: SocketAddr = match addr_str.parse() {
-                                            Ok(a) => a,
-                                            Err(_) => continue,
+                                        let addrs = match Peer::parse_addrs(addr_str) {
+                                            Some(a) => a,
+                                            None => continue,
                                         };
-                                        requests.lock().unwrap().push((addr, String::from(name), pubkey));
+                                        requests.lock().unwrap().push((addrs, String::from(name), pubkey));
                                         let admin_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
                                         let reply = format!("received[({}, {})]{}fallegji", addr_str, name, admin_pubkey_hex);
                                         let _ = stream.write_all(reply.as_bytes()).await;
@@ -408,11 +492,11 @@ impl RendezVous for Connection {
         let prvkey = self.prvkey.clone();
         let peers = Arc::clone(&self.peers);
         let admin_addr = self.rendezvous.0;
-        let my_addr = self.socket.lock().unwrap().0;
+        let my_addrs_str = self.my_addrs_string();
 
         let mut stream = TcpStream::connect(&admin_addr).await?;
         let my_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
-        let request = format!("{}[{}]{}fallegji", name, my_addr, my_pubkey_hex);
+        let request = format!("{}[{}]{}fallegji", name, my_addrs_str, my_pubkey_hex);
         stream.write_all(request.as_bytes()).await?;
         let timeout = tokio::time::Duration::from_secs(5);
         let start_time = tokio::time::Instant::now();
@@ -439,7 +523,7 @@ impl RendezVous for Connection {
                     let inner = &tuple_content[1..tuple_content.len()-1];
                     let parts: Vec<&str> = inner.splitn(2, ", ").collect();
                     if parts.len() != 2 { continue; }
-                    if parts[0] == my_addr.to_string() && parts[1] == name {
+                    if parts[0] == my_addrs_str && parts[1] == name {
                         let admin_pubkey = match hex::decode(admin_pubkey_hex)
                             .ok()
                             .and_then(|b| <[u8; 32]>::try_from(b).ok())
@@ -449,7 +533,7 @@ impl RendezVous for Connection {
                             None => continue,
                         };
                         let admin_peer = Peer {
-                            id: -1, user_id: None, addr: admin_addr, pubkey: admin_pubkey,
+                            id: -1, user_id: None, addrs: [admin_addr; 3], pubkey: admin_pubkey,
                             last_heartbeat: None, last_seen_typing: None
                         };
                         let key = admin_peer.shrdkeygen(prvkey.clone());
@@ -546,14 +630,15 @@ impl Communication for Connection {
         }
     }
 
-    async fn send_newpeer(&self, addr: SocketAddr, pubkey: PublicKey, db: &Database) -> Result<()> {
+    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, db: &Database) -> Result<()> {
         let shared = self.prvkey.diffie_hellman(&pubkey);
         let hkdf = Hkdf::<Sha256>::new(None, shared.as_bytes());
         let mut key_bytes = [0u8; 32];
         hkdf.expand(b"fallegji", &mut key_bytes).map_err(|e| anyhow::anyhow!("HKDF: {}", e))?;
         let key = *Key::from_slice(&key_bytes);
         let frame = Connection::encode(&key, NWP_HD, db.dump().await?)?;
-        let mut stream = TcpStream::connect(addr).await?;
+        let mut stream = connect_any(&addrs).await
+            .ok_or_else(|| anyhow::anyhow!("could not reach new peer on any address"))?;
         stream.write_all(&(frame.len() as u32).to_be_bytes()).await?;
         stream.write_all(&frame).await?;
         Ok(())
@@ -574,7 +659,7 @@ impl Communication for Connection {
             }
             if let Some(my_id) = me {
                 let me_peer = Peer {
-                    id: -1, user_id: Some(my_id), addr: self.socket.lock().unwrap().0,
+                    id: -1, user_id: Some(my_id), addrs: self.my_addrs(),
                     pubkey: PublicKey::from(&self.prvkey), last_heartbeat: None, last_seen_typing: None
                 };
                 let me_key = me_peer.shrdkeygen(self.prvkey.clone());

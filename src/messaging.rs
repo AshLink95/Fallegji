@@ -1,9 +1,9 @@
-use std::{collections::HashMap, io::Seek, sync::{Arc, RwLock}, time::Duration};
+use std::{collections::HashMap, sync::{Arc, RwLock}};
 use anyhow::Result;
-use tokio::{net::TcpStream, sync::Mutex as TokioMutex, time::timeout};
+use tokio::sync::Mutex as TokioMutex;
 use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
-use crate::{auth::{Role, Uid, User}, connection::{Communication, Connection, KeyGen, Peer, Peermap}, db::Database};
+use crate::{auth::{Role, Uid, User}, connection::{Communication, Connection, KeyGen, Peermap}, db::Database};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -130,9 +130,9 @@ impl Chat {
         for peer in all_peers {
             if let Some(peer_user_id) = peer.get_user_id() {
                 let shared_key = peer.shrdkeygen(prvkey.clone());
-                let addr = peer.get_addr();
+                let addrs = peer.get_addrs();
                 connect_tasks.push((peer_user_id, peer, shared_key, tokio::spawn(async move {
-                    timeout(Duration::from_secs(1), TcpStream::connect(addr)).await.ok().and_then(|r| r.ok())
+                    crate::connection::connect_any(&addrs).await
                 })));
             }
         }

@@ -10,7 +10,7 @@ async fn free_rendezvous_addr() -> SocketAddr {
 }
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port}, messaging::{Message, Chat}, auth::{Uid, User, Role}, db::Database};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port, local_addrs, connect_any}, messaging::{Message, Chat}, auth::{Uid, User, Role}, db::Database};
 use hex::ToHex;
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
@@ -83,18 +83,23 @@ fn test_peer() {
     // new_in: imported peer, valid + invalid user_id.
     let name = "TestPeer".to_string();
     let uid = Uid::from(10);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+    let addrs = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)), 8080),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8080),
+    ];
     let pubkey = PublicKey::from(&StaticSecret::from([1u8; 32]));
     let pubkey_hex: String = pubkey.as_bytes().encode_hex();
     let user_id = User::new(pubkey_hex, name.clone(), uid).get_id();
-    let imported = Peer::new_in(2, name, uid, user_id, addr, pubkey, Some(1111), Some(1234567890))
+    let imported = Peer::new_in(2, name, uid, user_id, addrs, pubkey, Some(1111), Some(1234567890))
         .expect("valid new_in");
     assert_eq!(imported.get_id(), 2);
     assert_eq!(imported.get_user_id(), Some(user_id));
-    assert_eq!(imported.get_addr(), addr);
+    assert_eq!(imported.get_addrs(), addrs, "all 3 addresses preserved");
+    assert_eq!(imported.get_addr(), addrs[1], "get_addr returns the LAN one");
     assert_eq!(imported.get_last_heartbeat(), Some(1234567890));
     assert_eq!(imported.get_last_seen_typing(), Some(1111));
-    assert!(Peer::new_in(2, "x".to_string(), uid, 999, addr, pubkey, None, None).is_err(),
+    assert!(Peer::new_in(2, "x".to_string(), uid, 999, addrs, pubkey, None, None).is_err(),
         "bad user_id rejected");
 
     // setters.
@@ -103,9 +108,13 @@ fn test_peer() {
     assert_eq!(peer.get_id(), 10);
     peer.set_id(20); // id only settable while < 0
     assert_eq!(peer.get_id(), 10);
-    let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090);
-    peer.set_addr(new_addr);
-    assert_eq!(peer.get_addr(), new_addr);
+    let new_addrs = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9090),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9090),
+    ];
+    peer.set_addrs(new_addrs);
+    assert_eq!(peer.get_addrs(), new_addrs);
     peer.set_last_heartbeat(Some(1));
     assert_eq!(peer.get_last_heartbeat(), Some(1));
     peer.set_last_seen_typing(Some(2));
@@ -124,6 +133,78 @@ fn test_peer() {
     assert!(p.is_typing());
     p.set_last_seen_typing(Some(now - 10));
     assert!(!p.is_typing());
+}
+
+/// The 3-address machinery: local_addrs, addrs_string/parse_addrs roundtrip, connect_any.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_peer_addresses() -> Result<()> {
+    // local_addrs: 3 candidates, all on `port`, first is loopback.
+    let addrs = local_addrs(7777)?;
+    assert_eq!(addrs.len(), 3);
+    assert!(addrs.iter().all(|a| a.port() == 7777), "all share the port");
+    assert!(addrs[0].ip().is_loopback(), "first is localhost");
+    assert!(!addrs[1].ip().is_unspecified(), "LAN is a real interface ip");
+
+    // new_out fills the 3 addresses with the given port.
+    let (peer, _) = Peer::new_out(1, 8080)?;
+    assert!(peer.get_addrs().iter().all(|a| a.port() == 8080));
+    assert_eq!(peer.get_addr(), peer.get_addrs()[1], "get_addr is the LAN one");
+
+    // addrs_string <-> parse_addrs roundtrip.
+    let s = peer.addrs_string();
+    assert_eq!(s.split(',').count(), 3, "serialized as 3 comma-joined addrs");
+    assert_eq!(Peer::parse_addrs(&s), Some(peer.get_addrs()), "roundtrips");
+
+    // parse_addrs: single-addr fallback + invalid input.
+    let one: SocketAddr = "1.2.3.4:5".parse().unwrap();
+    assert_eq!(Peer::parse_addrs("1.2.3.4:5"), Some([one; 3]), "single addr repeats");
+    assert_eq!(Peer::parse_addrs("not-an-addr"), None);
+
+    // set_addrs updates all three.
+    let mut p = peer.clone();
+    let na = local_addrs(9001)?;
+    p.set_addrs(na);
+    assert_eq!(p.get_addrs(), na);
+
+    // connect_any: returns the first reachable, None if none reachable.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let live = listener.local_addr()?;
+    let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+    assert!(connect_any(&[dead, live, dead]).await.is_some(), "reaches the live one");
+    assert!(connect_any(&[dead, dead]).await.is_none(), "all dead → None");
+    Ok(())
+}
+
+/// monitor_ip's refresh step persists our refreshed 3 addresses to the db.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_refresh_addrs_persists() -> Result<()> {
+    let (addr, listener) = get_free_port().await?;
+    let port = addr.port();
+    let db = Database::new(":memory:")?;
+    // A db-backed self peer (3 addrs on `port`), linked to a user, placed in the peermap.
+    let (peer, prvkey) = db.create_peer(port).await?;
+    let db_id = peer.get_id();
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = db.create_user(pubkey_hex, "me".to_string(), Uid::getuid()).await?;
+    let user_id = user.get_id();
+    db.update_peer_link_user(db_id, user_id).await?;
+    let key = peer.shrdkeygen(prvkey.clone());
+    let mut peermap = HashMap::new();
+    peermap.insert(user_id, (peer, key, None));
+
+    let mut conn = Connection::new(prvkey, free_rendezvous_addr().await, (addr, listener), peermap).await;
+    conn.set_user(user_id, "me".to_string(), Uid::getuid());
+
+    conn.refresh_addrs(&db).await?;
+
+    // Our peer's db row now holds 3 addresses, all on the bind port, loopback first.
+    let reloaded = db.read_peer(db_id).await?.expect("peer still there");
+    let addrs = reloaded.get_addrs();
+    assert!(addrs.iter().all(|a| a.port() == port), "all on the chosen port");
+    assert!(addrs[0].ip().is_loopback(), "loopback first");
+    // In-memory peer was updated too.
+    assert_eq!(conn.get_peer(&user_id).unwrap().get_addrs(), addrs, "peermap matches db");
+    Ok(())
 }
 
 /// Crypto: keypair gen, shared-key agreement, encode/decode roundtrip + compression + tamper.
@@ -227,7 +308,8 @@ async fn test_connection() -> Result<()> {
     conn.end_rendezvous();
     assert!(conn.bind_rendezvous().await.is_ok(), "Double bind failed");
 
-    let monitor_handle = tokio::spawn(async move { conn.monitor_ip().await });
+    let db = Database::new(":memory:")?;
+    let monitor_handle = tokio::spawn(async move { conn.monitor_ip(db).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     monitor_handle.abort();
     let result = tokio::time::timeout(Duration::from_millis(100), monitor_handle).await;
@@ -245,7 +327,8 @@ async fn test_rendezvous_requests() -> Result<()> {
     let client_addr = client_socket.0;
     let server_conn = Connection::new(server_keypair.1, rendezvous_addr, server_socket, HashMap::new()).await;
     let client_conn = Connection::new(client_keypair.1, rendezvous_addr, client_socket, HashMap::new()).await;
-    let requests: std::sync::Arc<std::sync::Mutex<Vec<(SocketAddr, String, PublicKey)>>> =
+    #[allow(clippy::complexity)]
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
@@ -265,7 +348,7 @@ async fn test_rendezvous_requests() -> Result<()> {
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].1, "TestUser");
-    assert_eq!(reqs[0].0, client_addr, "Recorded addr must match client's socket");
+    assert_eq!(reqs[0].0[1], client_addr, "LAN addr must match client's socket");
 
     // Handshake side-effect: newcomer derived the admin key and stored it (provisional key 0).
     assert!(client_conn.get_peer(&0).is_some(), "newcomer stored admin in peermap");
@@ -288,7 +371,8 @@ async fn test_fallback() -> Result<()> {
     // First caller binds → becomes holder
     assert!(conn1.fallback_lookup().await?, "first fallback_lookup should bind");
 
-    let requests: std::sync::Arc<std::sync::Mutex<Vec<(SocketAddr, String, PublicKey)>>> =
+    #[allow(clippy::complexity)]
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
@@ -311,7 +395,7 @@ async fn test_fallback() -> Result<()> {
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].1, "Peer2");
-    assert_eq!(reqs[0].0, sock2_addr, "Holder must record correct addr for reconnecting peer");
+    assert_eq!(reqs[0].0[1], sock2_addr, "Holder must record correct LAN addr");
 
     Ok(())
 }
@@ -517,14 +601,14 @@ async fn test_send_newpeer() -> Result<()> {
     let conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, get_free_port().await?, HashMap::new()).await;
 
     let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
-    conn.send_newpeer(laddr, new_pub, &db).await?;
+    conn.send_newpeer([laddr; 3], new_pub, &db).await?;
     let mut server = accept.await?;
 
     // Reconstruct the shared key the newcomer would derive: DH(new_prv, admin_pub).
     let admin_pub = PublicKey::from(&admin_prv);
     let admin_hex: String = admin_pub.as_bytes().encode_hex();
     let aid = User::new(admin_hex, "a".to_string(), Uid::from(1)).get_id();
-    let admin_peer = Peer::new_in(-1, "a".to_string(), Uid::from(1), aid, laddr, admin_pub, None, None).unwrap();
+    let admin_peer = Peer::new_in(-1, "a".to_string(), Uid::from(1), aid, [laddr; 3], admin_pub, None, None).unwrap();
     let key = admin_peer.shrdkeygen(new_prv);
 
     let (header, payload) = Connection::decode(&key, &read_frame(&mut server).await?)?;

@@ -16,7 +16,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::{Connection, Communication, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Connection, Communication, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, db::Database, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
@@ -25,16 +25,18 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use tokio_util::sync::CancellationToken;
 
 // admin initialization functions
-type Requests = Arc<Mutex<Vec<(SocketAddr, String, PublicKey)>>>;
+type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>>;
 
 // Admin background tasks: accept direct peer connections, watch our IP, hold the
 // rendezvous (fallback), and read incoming join requests. All cancel via `token`.
 fn admin_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, requests: Requests, token: CancellationToken) {
     tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
-    let mc = Arc::clone(conn); let mt = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip() => {} } });
+    let dbc = chat.db.clone(); let mc = Arc::clone(conn); let mt = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip(dbc) => {} } });
     let fc = Arc::clone(conn); let ft = token.clone();
     tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
+    let hc = Arc::clone(conn); let ht = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = ht.cancelled() => {} _ = hc.heartbeat_loop() => {} } });
     let rc = Arc::clone(conn);
     tokio::spawn(async move { let _ = rc.rcv_requests(requests, token).await; });
 }
@@ -86,10 +88,12 @@ async fn startstuffold(choice: &str, config: &Config, requests: Requests, token:
 // take over the rendezvous (fallback) if the holder drops. All cancel via `token`.
 fn member_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, token: CancellationToken) {
     tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
-    let mc = Arc::clone(conn); let mt = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip() => {} } });
+    let dbc = chat.db.clone(); let mc = Arc::clone(conn); let mt = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip(dbc) => {} } });
     let fc = Arc::clone(conn); let ft = token.clone();
     tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
+    let hc = Arc::clone(conn); let ht = token.clone();
+    tokio::spawn(async move { tokio::select! { _ = ht.cancelled() => {} _ = hc.heartbeat_loop() => {} } });
 }
 
 async fn joinstuffnew(choice: &str, user_name: &str, rendezvous: &str, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
@@ -131,8 +135,9 @@ async fn joinstuffold(choice: &str, config: &Config, token: CancellationToken, r
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
     member_rcv(&conn, &chat, token);
-    chat.send_join(&conn).await?;               // tell existing peers we're back
-    let _ = conn.snd_requests(user_name).await; // re-handshake with the rendezvous holder
+    chat.send_join(&conn).await?;
+    conn.snd_requests(user_name).await?;
+    conn.send_db_req(&chat).await?;
     *ran = false;
     Ok((conn, chat))
 }
@@ -183,7 +188,7 @@ pub async fn app() -> Result<()> {
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
     // let token = CancellationToken::new();
-    let requests = Arc::new(Mutex::new(Vec::<(SocketAddr, String, PublicKey)>::new()));
+    let requests = Arc::new(Mutex::new(Vec::<([SocketAddr; 3], String, PublicKey)>::new()));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;

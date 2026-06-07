@@ -124,7 +124,7 @@ macro_rules! initServer {
                     let text_req_color = if $active_section == 1 { $config.users_color } else { $config.border_color };
                     let name_text = Paragraph::new(format!("{}", name))
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
-                    let addr_text = Paragraph::new(format!("{}", addr))
+                    let addr_text = Paragraph::new(format!("{}", addr[1])) // LAN addr
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
 
                     let accept_active = row_active && $active_row;

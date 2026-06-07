@@ -90,7 +90,7 @@ impl Database {
 
             conn.execute(
                 "INSERT INTO peers (user_id, addr, pubkey) VALUES (?1, ?2, ?3)",
-                params![None::<String>, peer.get_addr().to_string(), pubkey]
+                params![None::<String>, peer.addrs_string(), pubkey]
             )?;
             let id = conn.last_insert_rowid() as i32;
             peer.set_id(id);
@@ -217,11 +217,11 @@ impl Database {
                 };
 
                 let addr_str: String = row.get(1)?;
-                let addr = addr_str.parse().map_err(|e: std::net::AddrParseError| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                let addrs = Peer::parse_addrs(&addr_str).ok_or_else(|| rusqlite::Error::InvalidParameterName(addr_str.clone()))?;
                 let pubkey = PublicKey::from(row.get::<_, [u8; 32]>(2)?);
                 let last_heartbeat = row.get::<_, Option<i64>>(3)?;
 
-                let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, None, last_heartbeat).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addrs, pubkey, None, last_heartbeat).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                 Ok(Some(peer))
             }) {
                 Ok(p) => p.unwrap(),
@@ -314,14 +314,15 @@ impl Database {
             Ok(conn.changes() > 0)
         }).await?
     }
-    /// Update address in a peer
-    pub async fn update_peer_addr(&self, id: i32, addr: SocketAddr) -> Result<bool> {
+    /// Update a peer's 3 addresses (stored comma-joined in the `addr` column).
+    pub async fn update_peer_addrs(&self, id: i32, addrs: [SocketAddr; 3]) -> Result<bool> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
+            let addr_str = addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
             let conn = conn.lock().unwrap();
             conn.execute(
                 "UPDATE peers SET addr = ?1 WHERE id = ?2",
-                params![addr.to_string(), id],
+                params![addr_str, id],
             )?;
 
             Ok(conn.changes() > 0)
@@ -501,14 +502,14 @@ impl Database {
                        };
 
                        let addr_str: String = row.get(1)?;
-                       let addr = addr_str.parse().map_err(|e: std::net::AddrParseError| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                       let addrs = Peer::parse_addrs(&addr_str).ok_or_else(|| rusqlite::Error::InvalidParameterName(addr_str.clone()))?;
                        let pubkey_bytes: Vec<u8> = row.get(2)?;
                        let pubkey_array: [u8; 32] = pubkey_bytes.try_into()
                            .map_err(|_| rusqlite::Error::InvalidParameterName("Invalid pubkey length".into()))?;
                        let pubkey = PublicKey::from(pubkey_array);
                        let last_heartbeat = row.get::<_, Option<i64>>(3)?;
 
-                       let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addr, pubkey, None, last_heartbeat)
+                       let peer = Peer::new_in(id, peer_name, peer_uid, peer_user_id, addrs, pubkey, None, last_heartbeat)
                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
                        Ok(Some(peer))
                    }).unwrap_or_default();
@@ -647,7 +648,7 @@ impl Database {
                         "UPDATE peers SET user_id = ?1, addr = ?2, pubkey = ?3, last_heartbeat = ?4 WHERE id = ?5",
                         params![
                             peer.get_user_id().map(|u| u.to_string()),
-                            peer.get_addr().to_string(),
+                            peer.addrs_string(),
                             peer.get_pubkey().to_bytes(),
                             peer.get_last_heartbeat(),
                             id
@@ -671,7 +672,7 @@ impl Database {
                         params![
                             id,
                             peer.get_user_id().map(|u| u.to_string()),
-                            peer.get_addr().to_string(),
+                            peer.addrs_string(),
                             peer.get_pubkey().to_bytes(),
                             peer.get_last_heartbeat()
                         ],

@@ -1,5 +1,4 @@
 // prompt engineered
-use std::net::SocketAddr;
 use fallegji::db::Database;
 use fallegji::auth::{Authentication, Role, User, Uid};
 use fallegji::messaging::Message;
@@ -74,7 +73,11 @@ async fn test_create_read_peer() -> Result<()> {
     let peer = read_peer.unwrap();
     assert_eq!(peer.get_id(), peer_id);
     assert_eq!(peer.get_addr().port(), 6967);
-    
+    // The db column holds all 3 addresses, and read_peer loads them back.
+    assert_eq!(peer.get_addrs(), created.get_addrs(), "all 3 addresses round-trip through the db");
+    assert_eq!(peer.get_addrs().len(), 3);
+    assert!(peer.get_addrs()[0].ip().is_loopback(), "loopback preserved");
+
     Ok(())
 }
 
@@ -147,23 +150,27 @@ async fn test_update_peer() -> Result<()> {
     let linked = db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
     assert!(linked);
     
-    // Update address
-    let new_addr: SocketAddr = "192.168.1.100:9090".parse()?;
-    let updated = db.update_peer_addr(peer.get_id(), new_addr).await?;
+    // Update the 3 addresses
+    let new_addrs = [
+        "127.0.0.1:9090".parse()?,
+        "192.168.1.100:9090".parse()?,
+        "1.2.3.4:9090".parse()?,
+    ];
+    let updated = db.update_peer_addrs(peer.get_id(), new_addrs).await?;
     assert!(updated);
-    
+
     // Update heartbeat
     let heartbeat_updated = db.update_peer_last_heartbeat(peer.get_id(), Some(1234567890)).await?;
     assert!(heartbeat_updated);
-    
-    // Verify updates
+
+    // Verify updates — all 3 addresses persisted and reload.
     let read_peer = db.read_peer(peer.get_id()).await?.unwrap();
     assert_eq!(read_peer.get_user_id(), Some(user.get_id()));
-    assert_eq!(read_peer.get_addr(), new_addr);
+    assert_eq!(read_peer.get_addrs(), new_addrs);
     assert_eq!(read_peer.get_last_heartbeat(), Some(1234567890));
-    
+
     // Update non-existent peer returns false
-    let result = db.update_peer_addr(99999, new_addr).await?;
+    let result = db.update_peer_addrs(99999, new_addrs).await?;
     assert!(!result);
     
     Ok(())
