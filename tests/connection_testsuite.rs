@@ -8,9 +8,17 @@ async fn free_rendezvous_addr() -> SocketAddr {
     drop(l);
     addr
 }
+
+/// An ephemeral bound localhost socket — same shape as get_free_port but off its tiny
+/// fixed range (1952–2025), which gets exhausted when the suite runs in parallel.
+async fn ephemeral() -> anyhow::Result<(SocketAddr, TcpListener)> {
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = l.local_addr()?;
+    Ok((addr, l))
+}
 use chacha20poly1305::Key;
 use x25519_dalek::{PublicKey, StaticSecret};
-use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, get_free_port, local_addrs, connect_any}, messaging::{Message, Chat}, auth::{Uid, User, Role}, db::Database};
+use fallegji::{connection::{Connection, KeyGen, Peer, Secrecy, RendezVous, Communication, local_addrs, connect_any}, messaging::{Message, Chat}, auth::{Uid, User, Role}, db::Database};
 use hex::ToHex;
 use tokio_util::sync::CancellationToken;
 use std::time::Duration;
@@ -37,7 +45,7 @@ async fn conn_with_peer() -> Result<(Connection, TcpStream, Key)> {
 
     let (_, prvkey) = Peer::keypairgen()?;
     let rendez = free_rendezvous_addr().await;
-    let sock = get_free_port().await?;
+    let sock = ephemeral().await?;
     let conn = Connection::new(prvkey, rendez, sock, peermap).await;
     Ok((conn, server, key))
 }
@@ -62,6 +70,11 @@ fn test_chat() -> Result<Chat> {
     })
 }
 
+/// Look up one peer by user_id via the public peer_list snapshot.
+fn peer_of(conn: &Connection, uid: u64) -> Option<Peer> {
+    conn.peer_list().into_iter().find(|(id, _)| *id == uid).map(|(_, p)| p)
+}
+
 // Header bytes (mirror connection.rs private consts)
 const MSG_HD: u8 = 0xF1;
 const DBS_HD: u8 = 0xC4;
@@ -73,10 +86,10 @@ fn test_peer() {
     let (peer, prvkey) = Peer::new_out(1, 9000).unwrap();
     assert_eq!(peer.get_id(), 1);
     assert_eq!(peer.get_user_id(), None);
-    assert_eq!(peer.get_addr().port(), 9000);
+    assert_eq!(peer.get_addrs()[1].port(), 9000);
     assert_eq!(peer.get_last_heartbeat(), None);
     assert_eq!(peer.get_last_seen_typing(), None);
-    assert_ne!(peer.get_addr().ip(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+    assert_ne!(peer.get_addrs()[1].ip(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
     assert_eq!(peer.get_pubkey().as_bytes().len(), 32);
     assert_eq!(prvkey.as_bytes().len(), 32);
 
@@ -96,7 +109,7 @@ fn test_peer() {
     assert_eq!(imported.get_id(), 2);
     assert_eq!(imported.get_user_id(), Some(user_id));
     assert_eq!(imported.get_addrs(), addrs, "all 3 addresses preserved");
-    assert_eq!(imported.get_addr(), addrs[1], "get_addr returns the LAN one");
+    assert_eq!(imported.get_addrs()[1], addrs[1], "get_addr returns the LAN one");
     assert_eq!(imported.get_last_heartbeat(), Some(1234567890));
     assert_eq!(imported.get_last_seen_typing(), Some(1111));
     assert!(Peer::new_in(2, "x".to_string(), uid, 999, addrs, pubkey, None, None).is_err(),
@@ -136,7 +149,7 @@ fn test_peer() {
 }
 
 /// The 3-address machinery: local_addrs, addrs_string/parse_addrs roundtrip, connect_any.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_peer_addresses() -> Result<()> {
     // local_addrs: 3 candidates, all on `port`, first is loopback.
     let addrs = local_addrs(7777)?;
@@ -148,7 +161,7 @@ async fn test_peer_addresses() -> Result<()> {
     // new_out fills the 3 addresses with the given port.
     let (peer, _) = Peer::new_out(1, 8080)?;
     assert!(peer.get_addrs().iter().all(|a| a.port() == 8080));
-    assert_eq!(peer.get_addr(), peer.get_addrs()[1], "get_addr is the LAN one");
+    assert_eq!(peer.get_addrs()[1], peer.get_addrs()[1], "get_addr is the LAN one");
 
     // addrs_string <-> parse_addrs roundtrip.
     let s = peer.addrs_string();
@@ -176,9 +189,9 @@ async fn test_peer_addresses() -> Result<()> {
 }
 
 /// monitor_ip's refresh step persists our refreshed 3 addresses to the db.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_refresh_addrs_persists() -> Result<()> {
-    let (addr, listener) = get_free_port().await?;
+    let (addr, listener) = ephemeral().await?;
     let port = addr.port();
     let db = Database::new(":memory:")?;
     // A db-backed self peer (3 addrs on `port`), linked to a user, placed in the peermap.
@@ -203,9 +216,10 @@ async fn test_refresh_addrs_persists() -> Result<()> {
     assert!(addrs.iter().all(|a| a.port() == port), "all on the chosen port");
     assert!(addrs[0].ip().is_loopback(), "loopback first");
     // In-memory peer was updated too.
-    assert_eq!(conn.get_peer(&user_id).unwrap().get_addrs(), addrs, "peermap matches db");
+    assert_eq!(peer_of(&conn, user_id).unwrap().get_addrs(), addrs, "peermap matches db");
     Ok(())
 }
+
 
 /// Crypto: keypair gen, shared-key agreement, encode/decode roundtrip + compression + tamper.
 #[test]
@@ -298,11 +312,11 @@ fn test_crypto() {
     assert!(Connection::decode(key, &encrypted[..11]).is_err());
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_connection() -> Result<()> {
     let keypair = Peer::keypairgen()?;
     let rendezvous_addr = free_rendezvous_addr().await;
-    let socket = get_free_port().await?;
+    let socket = ephemeral().await?;
     let conn = Connection::new(keypair.1, rendezvous_addr, socket, HashMap::new()).await;
     assert!(conn.bind_rendezvous().await.is_ok(), "Failed to bind rendezvous");
     conn.end_rendezvous();
@@ -317,18 +331,18 @@ async fn test_connection() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_rendezvous_requests() -> Result<()> {
     let rendezvous_addr = free_rendezvous_addr().await;
     let server_keypair = Peer::keypairgen()?;
     let client_keypair = Peer::keypairgen()?;
-    let server_socket = get_free_port().await?;
-    let client_socket = get_free_port().await?;
+    let server_socket = ephemeral().await?;
+    let client_socket = ephemeral().await?;
     let client_addr = client_socket.0;
     let server_conn = Connection::new(server_keypair.1, rendezvous_addr, server_socket, HashMap::new()).await;
     let client_conn = Connection::new(client_keypair.1, rendezvous_addr, client_socket, HashMap::new()).await;
     #[allow(clippy::complexity)]
-    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>> =
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
@@ -351,18 +365,18 @@ async fn test_rendezvous_requests() -> Result<()> {
     assert_eq!(reqs[0].0[1], client_addr, "LAN addr must match client's socket");
 
     // Handshake side-effect: newcomer derived the admin key and stored it (provisional key 0).
-    assert!(client_conn.get_peer(&0).is_some(), "newcomer stored admin in peermap");
+    assert!(peer_of(&client_conn, 0).is_some(), "newcomer stored admin in peermap");
 
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_fallback() -> Result<()> {
     let rendezvous_addr = free_rendezvous_addr().await;
     let (_, prv1) = Peer::keypairgen()?;
     let (_, prv2) = Peer::keypairgen()?;
-    let sock1 = get_free_port().await?;
-    let sock2 = get_free_port().await?;
+    let sock1 = ephemeral().await?;
+    let sock2 = ephemeral().await?;
     let sock2_addr = sock2.0;
 
     let conn1 = Connection::new(prv1, rendezvous_addr, sock1, HashMap::new()).await;
@@ -372,7 +386,7 @@ async fn test_fallback() -> Result<()> {
     assert!(conn1.fallback_lookup().await?, "first fallback_lookup should bind");
 
     #[allow(clippy::complexity)]
-    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>> =
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let requests_clone = std::sync::Arc::clone(&requests);
     let token = CancellationToken::new();
@@ -402,7 +416,7 @@ async fn test_fallback() -> Result<()> {
 
 async fn bare_conn() -> Result<Connection> {
     let (_, prvkey) = Peer::keypairgen()?;
-    Ok(Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, HashMap::new()).await)
+    Ok(Connection::new(prvkey, free_rendezvous_addr().await, ephemeral().await?, HashMap::new()).await)
 }
 
 // --- send path: each broadcast emits a valid, decryptable frame with the right header ---
@@ -491,8 +505,28 @@ async fn test_read_data() -> Result<()> {
     let chat_c = test_chat()?;
     let mut conn2 = bare_conn().await?;
     conn2.set_user(1, "me".to_string(), Uid::from(1));
-    conn2.read_newpeer(&chat_c, serde_json::to_vec(&admin_snap)?).await?;
+    conn2.read_newpeer(&chat_c, serde_json::to_vec(&("RealChat".to_string(), admin_snap))?).await?;
     assert!(chat_c.db.load_all_users().await?.iter().any(|u| u.get_name() == "admin"), "newcomer adopted admin db");
+
+    // accept_chat: joiner with no chat yet creates it from the admin's db (named with
+    // the real chat name) and registers itself; the slot then holds the chat.
+    let admin_db2 = Database::new(":memory:")?;
+    let (ap2, _) = admin_db2.create_peer(9000).await?;
+    let ap2_hex = ap2.get_pubkey().to_bytes().encode_hex::<String>();
+    let au2 = admin_db2.create_user(ap2_hex, "admin".to_string(), Uid::getuid()).await?;
+    admin_db2.update_peer_link_user(ap2.get_id(), au2.get_id()).await?;
+    let snap2 = admin_db2.dump().await?;
+    let mut conn3 = bare_conn().await?;
+    conn3.set_user(42, "joiner".to_string(), Uid::getuid());
+    let conn3 = std::sync::Arc::new(conn3);
+    let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    conn3.accept_chat(&slot, serde_json::to_vec(&("RealRoom".to_string(), snap2))?).await?;
+    let acc = slot.lock().unwrap().take().expect("slot filled");
+    assert_eq!(acc.name, "RealRoom");
+    assert!(acc.chat.db.load_all_users().await?.iter().any(|u| u.get_name() == "admin"), "adopted admin db");
+    assert!(acc.chat.db.load_all_users().await?.iter().any(|u| u.get_name() == "joiner"), "registered self");
+    assert!(std::path::Path::new("joiner__RealRoom.db").exists(), "db file named with real chat name");
+    let _ = std::fs::remove_file("joiner__RealRoom.db");
     Ok(())
 }
 
@@ -510,23 +544,23 @@ async fn test_read_presence() -> Result<()> {
     let mut peermap = HashMap::new();
     peermap.insert(uid, (peer.clone(), key, None));
     let (_, prvkey) = Peer::keypairgen()?;
-    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, ephemeral().await?, peermap).await;
 
     // get_peer: known + unknown.
-    assert!(conn.get_peer(&uid).is_some(), "known peer");
-    assert!(conn.get_peer(&999).is_none(), "unknown peer");
+    assert!(peer_of(&conn, uid).is_some(), "known peer");
+    assert!(peer_of(&conn, 999).is_none(), "unknown peer");
 
     // heartbeat: in-memory + persisted.
-    assert!(conn.get_peer(&uid).unwrap().get_last_heartbeat().is_none());
+    assert!(peer_of(&conn, uid).unwrap().get_last_heartbeat().is_none());
     conn.read_heartbeat(&chat, uid).await?;
-    assert!(conn.get_peer(&uid).unwrap().get_last_heartbeat().is_some(), "in-memory heartbeat");
+    assert!(peer_of(&conn, uid).unwrap().get_last_heartbeat().is_some(), "in-memory heartbeat");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(chat.db.read_peer(peer.get_id()).await?.unwrap().get_last_heartbeat().is_some(), "heartbeat persisted");
 
     // typing: in-memory.
-    assert!(conn.get_peer(&uid).unwrap().get_last_seen_typing().is_none());
+    assert!(peer_of(&conn, uid).unwrap().get_last_seen_typing().is_none());
     conn.read_typing(uid).await?;
-    assert!(conn.get_peer(&uid).unwrap().get_last_seen_typing().is_some(), "typing set");
+    assert!(peer_of(&conn, uid).unwrap().get_last_seen_typing().is_some(), "typing set");
     Ok(())
 }
 
@@ -552,7 +586,7 @@ async fn test_send_db_req_targets_admin() -> Result<()> {
     peermap.insert(admin_id, (peer, key, Some(Arc::new(Mutex::new(client)))));
 
     let (_, prvkey) = Peer::keypairgen()?;
-    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, ephemeral().await?, peermap).await;
 
     let chat = test_chat()?;
     chat.members.write().unwrap().insert(admin_id, admin);
@@ -579,10 +613,13 @@ async fn test_read_db_req_responds_with_sync() -> Result<()> {
     let mut peermap = HashMap::new();
     peermap.insert(5u64, (peer, key, Some(Arc::new(Mutex::new(client)))));
     let (_, prvkey) = Peer::keypairgen()?;
-    let conn = Connection::new(prvkey, free_rendezvous_addr().await, get_free_port().await?, peermap).await;
+    let conn = Connection::new(prvkey, free_rendezvous_addr().await, ephemeral().await?, peermap).await;
 
     let chat = test_chat()?;
-    conn.read_db_req(&chat).await?;
+    // The request now carries the requester's db; read_db_req merges it then replies.
+    let src = Database::new(":memory:")?;
+    let payload = serde_json::to_vec(&src.dump().await?)?;
+    conn.read_db_req(&chat, payload).await?;
 
     let (header, _) = Connection::decode(&key, &read_frame(&mut server).await?)?;
     assert_eq!(header, DBS_HD, "db request answered with a db sync");
@@ -598,10 +635,16 @@ async fn test_send_newpeer() -> Result<()> {
     let (_, admin_prv) = Peer::keypairgen()?;
     let (new_pub, new_prv) = Peer::keypairgen()?;
     let db = Database::new(":memory:")?;
-    let conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, get_free_port().await?, HashMap::new()).await;
+    let conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, ephemeral().await?, HashMap::new()).await;
 
+    let chat = Chat {
+        message_history: Arc::new(std::sync::RwLock::new(Vec::new())),
+        members: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
+        db,
+    };
     let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
-    conn.send_newpeer([laddr; 3], new_pub, &db).await?;
+    conn.send_newpeer([laddr; 3], new_pub, "newbie", 7, "room", &chat).await?;
     let mut server = accept.await?;
 
     // Reconstruct the shared key the newcomer would derive: DH(new_prv, admin_pub).
@@ -613,14 +656,15 @@ async fn test_send_newpeer() -> Result<()> {
 
     let (header, payload) = Connection::decode(&key, &read_frame(&mut server).await?)?;
     assert_eq!(header, NWP_HD);
-    let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
+    let (chat_name, bytes): (String, Vec<u8>) = serde_json::from_slice(&payload)?;
+    assert_eq!(chat_name, "room", "NWP carries the chat name");
     assert!(!bytes.is_empty(), "NWP carries the db snapshot");
     Ok(())
 }
 
 /// Integration: spawn listen as a background task, push a burst of frames over one
 /// connection, and verify every header dispatched to the right handler (state mutated).
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_listen_dispatch() -> Result<()> {
     let chat = Arc::new(test_chat()?);
     // Sender must exist (read_msg joins users; heartbeat reads the peer back).
@@ -635,14 +679,16 @@ async fn test_listen_dispatch() -> Result<()> {
     let mut peermap = HashMap::new();
     peermap.insert(sid, (peer.clone(), key, None));
     let (_, prvkey) = Peer::keypairgen()?;
-    let socket = get_free_port().await?;
+    let socket = ephemeral().await?;
     let addr = socket.0;
     let conn = Arc::new(Connection::new(prvkey, free_rendezvous_addr().await, socket, peermap).await);
 
     // Background listen loop.
     let lconn = Arc::clone(&conn);
-    let lchat = Arc::clone(&chat);
-    tokio::spawn(async move { let _ = lconn.listen(lchat, CancellationToken::new()).await; });
+    let lslot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new(), peer_id: -1 }
+    )));
+    tokio::spawn(async move { let _ = lconn.listen(lslot, CancellationToken::new()).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Burst of frames: message, heartbeat, typing.
@@ -660,8 +706,226 @@ async fn test_listen_dispatch() -> Result<()> {
     // MSG dispatched → history.
     assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "live"), "message dispatched");
     // HBT + TYP dispatched → peer presence updated.
-    let p = conn.get_peer(&sid).expect("peer present");
+    let p = peer_of(&conn, sid).expect("peer present");
     assert!(p.get_last_heartbeat().is_some(), "heartbeat dispatched");
     assert!(p.get_last_seen_typing().is_some(), "typing dispatched");
+    Ok(())
+}
+
+/// End-to-end: admin accepts a joiner, then both directions of messaging must work
+/// (received into history) — reproduces the "peers don't see each other's messages" bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_message_exchange() -> Result<()> {
+    use fallegji::connection::{Accepted, ChatSlot};
+
+    // ---- Admin: real socket + db with its own user/peer + listen ----
+    let admin_sock = ephemeral().await?;
+    let admin_addr = admin_sock.0;
+    let (_, admin_prv) = Peer::keypairgen()?;
+    let admin_pub = PublicKey::from(&admin_prv);
+    let admin_db = Database::new(":memory:")?;
+    let admin_user = admin_db.create_user(admin_pub.to_bytes().encode_hex::<String>(), "admin".to_string(), Uid::from(1)).await?;
+    admin_db.create_peer_with(admin_pub, [admin_addr; 3], admin_user.get_id()).await?;
+    let admin_chat = Arc::new(Chat {
+        message_history: Arc::new(std::sync::RwLock::new(Vec::new())),
+        members: Arc::new(std::sync::RwLock::new(std::iter::once((admin_user.get_id(), admin_user.clone())).collect())),
+        current_user: admin_user.clone(),
+        db: admin_db.clone(),
+    });
+    let mut admin_conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, admin_sock, HashMap::new()).await;
+    admin_conn.set_user(admin_user.get_id(), "admin".to_string(), Uid::from(1));
+    let admin_conn = Arc::new(admin_conn);
+    let admin_slot: ChatSlot = Arc::new(std::sync::Mutex::new(Some(Accepted { chat: admin_chat.clone(), name: String::new(), peer_id: -1 })));
+    tokio::spawn(Arc::clone(&admin_conn).listen(admin_slot, CancellationToken::new()));
+
+    // ---- Joiner: real socket, knows admin's key (as snd_requests would set up) + listen ----
+    let joiner_sock = ephemeral().await?;
+    let joiner_addr = joiner_sock.0;
+    let (joiner_peer, joiner_prv) = Peer::new_out(-1, joiner_addr.port())?;
+    let joiner_pub = joiner_peer.get_pubkey();
+    let joiner_uid = Uid::from(2);
+    let joiner_uid_val = User::new(joiner_pub.to_bytes().encode_hex::<String>(), "joiner".to_string(), joiner_uid).get_id();
+    let admin_peer_for_joiner = Peer::new_in(-1, "admin".to_string(), Uid::from(1), admin_user.get_id(), [admin_addr; 3], admin_pub, None, None).unwrap();
+    let admin_key = admin_peer_for_joiner.shrdkeygen(joiner_prv.clone());
+    let mut joiner_peermap = HashMap::new();
+    joiner_peermap.insert(0u64, (admin_peer_for_joiner, admin_key, None));
+    let mut joiner_conn = Connection::new(joiner_prv.clone(), free_rendezvous_addr().await, joiner_sock, joiner_peermap).await;
+    joiner_conn.set_user(joiner_uid_val, "joiner".to_string(), joiner_uid);
+    let joiner_conn = Arc::new(joiner_conn);
+    let joiner_slot: ChatSlot = Arc::new(std::sync::Mutex::new(None));
+    tokio::spawn(Arc::clone(&joiner_conn).listen(Arc::clone(&joiner_slot), CancellationToken::new()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // ---- Admin accepts the joiner: NWP → joiner creates chat, syncs back ----
+    admin_conn.send_newpeer([joiner_addr; 3], joiner_pub, "joiner", 2, "room", &admin_chat).await?;
+
+    // Admin learns the joiner immediately at accept (uid came in the request), NOT only
+    // after the reverse sync — so its messages are never "Unknown".
+    assert!(admin_chat.members.read().unwrap().values().any(|u| u.get_name() == "joiner"), "admin knows joiner at accept time");
+
+    // Poll (tolerant of scheduling under parallel load) for the joiner's chat to be born.
+    let mut joiner_chat = None;
+    for _ in 0..60 {
+        if let Some(c) = joiner_slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { joiner_chat = Some(c); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let joiner_chat = joiner_chat.expect("joiner chat created");
+
+    async fn wait_for(hist: &Arc<std::sync::RwLock<Vec<Message>>>, needle: &str) -> bool {
+        for _ in 0..60 {
+            if hist.read().unwrap().iter().any(|m| m.get_contents() == needle) { return true; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    // ---- Admin → joiner ----
+    admin_conn.send_msg(Message::new(1, admin_user.get_id(), "from admin".to_string())).await?;
+    assert!(wait_for(&joiner_chat.message_history, "from admin").await, "joiner sees admin's message");
+
+    // ---- Joiner → admin ----
+    joiner_conn.send_msg(Message::new(2, joiner_uid_val, "from joiner".to_string())).await?;
+    assert!(wait_for(&admin_chat.message_history, "from joiner").await, "admin sees joiner's message");
+
+    // Admin must KNOW the joiner (not "Unknown") and both peers must persist (no id clobber).
+    assert!(admin_chat.members.read().unwrap().values().any(|u| u.get_name() == "joiner"), "admin knows the joiner");
+    assert!(admin_chat.members.read().unwrap().contains_key(&0u64), "sys user kept in members");
+    assert_eq!(admin_db.load_all_peers().await?.len(), 2, "both peers persist (admin + joiner)");
+
+    Ok(())
+}
+
+// ---- Real-network multi-peer: roster visibility + message de-duplication --------
+
+struct NetNode {
+    name: String,
+    conn: std::sync::Arc<Connection>,
+    chat: std::sync::Arc<Chat>,
+    addr: SocketAddr,
+    pubkey: PublicKey,
+    prvkey: StaticSecret,
+    user_id: u64,
+    uid: Uid,
+    token: CancellationToken,
+}
+
+fn knows(n: &NetNode, name: &str) -> bool {
+    n.chat.members.read().unwrap().values().any(|u| u.get_name() == name)
+}
+async fn msg_count(n: &NetNode, content: &str) -> Result<usize> {
+    Ok(n.chat.db.load_all_messages().await?.iter().filter(|m| m.get_contents() == content).count())
+}
+
+/// A member drops off (its background tasks stop) and comes back on a fresh socket,
+/// reusing its identity + existing db (Chat::old-style), then re-meshes: it re-dials
+/// everyone and the admin re-dials it (as rcv_requests→reconnect_peer would).
+async fn rejoin(admin: &NetNode, old: NetNode, room: &str) -> Result<NetNode> {
+    old.token.cancel(); // leave
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = l.local_addr()?;
+    let mut conn = Connection::new(old.prvkey.clone(), free_rendezvous_addr().await, (addr, l), HashMap::new()).await;
+    conn.set_user(old.user_id, old.name.clone(), old.uid);
+    conn.rebuild_peermap(&old.chat.db).await?; // learn peers from our own db
+    let conn = std::sync::Arc::new(conn);
+    let token = CancellationToken::new();
+    let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&old.chat), name: room.to_string(), peer_id: -1 })));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
+    conn.connect_peers().await;                                  // we dial everyone
+    admin.conn.reconnect_peer(old.pubkey, [addr; 3]).await;      // admin dials us back
+    Ok(NetNode { name: old.name, conn, chat: old.chat, addr, pubkey: old.pubkey, prvkey: old.prvkey, user_id: old.user_id, uid: old.uid, token })
+}
+
+async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = l.local_addr()?;
+    let (_, prv) = Peer::keypairgen()?;
+    let pubkey = PublicKey::from(&prv);
+    let uid = Uid::from(1);
+    let db = Database::new(":memory:")?;
+    let user = db.create_user(pubkey.as_bytes().encode_hex::<String>(), name.to_string(), uid).await?;
+    db.create_peer_with(pubkey, [addr; 3], user.get_id()).await?;
+    let chat = std::sync::Arc::new(Chat {
+        message_history: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+        members: std::sync::Arc::new(std::sync::RwLock::new(std::iter::once((user.get_id(), user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
+        current_user: user.clone(),
+        db,
+    });
+    let mut conn = Connection::new(prv.clone(), free_rendezvous_addr().await, (addr, l), HashMap::new()).await;
+    conn.set_user(user.get_id(), name.to_string(), uid);
+    let conn = std::sync::Arc::new(conn);
+    let token = CancellationToken::new();
+    let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&chat), name: room.to_string(), peer_id: -1 })));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
+    Ok(NetNode { name: name.into(), conn, chat, addr, pubkey, prvkey: prv, user_id: user.get_id(), uid, token })
+}
+
+async fn net_join(admin: &NetNode, name: &str, room: &str, uid_n: u32) -> Result<NetNode> {
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = l.local_addr()?;
+    let (peer, prv) = Peer::new_out(-1, addr.port())?;
+    let pubkey = peer.get_pubkey();
+    let uid = Uid::from(uid_n);
+    let user_id = User::new(pubkey.as_bytes().encode_hex::<String>(), name.to_string(), uid).get_id();
+    let admin_peer = Peer::new_in(-1, admin.name.clone(), admin.uid, admin.user_id, [admin.addr; 3], admin.pubkey, None, None)?;
+    let admin_key = admin_peer.shrdkeygen(prv.clone());
+    let mut peermap = HashMap::new();
+    peermap.insert(0u64, (admin_peer, admin_key, None));
+    let mut conn = Connection::new(prv.clone(), free_rendezvous_addr().await, (addr, l), peermap).await;
+    conn.set_user(user_id, name.to_string(), uid);
+    let conn = std::sync::Arc::new(conn);
+    let token = CancellationToken::new();
+    let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(std::sync::Arc::clone(&slot), token.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    admin.conn.send_newpeer([addr; 3], pubkey, name, uid.as_raw(), room, &admin.chat).await?;
+    let mut chat = None;
+    for _ in 0..100 {
+        if let Some(c) = slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { chat = Some(c); break; }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let chat = chat.ok_or_else(|| anyhow::anyhow!("{name} not accepted"))?;
+    Ok(NetNode { name: name.into(), conn, chat, addr, pubkey, prvkey: prv, user_id, uid, token })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_net_roster_and_dedup() -> Result<()> {
+    let room = "room";
+    let alice = net_admin("alice", room).await?;
+    let bob = net_join(&alice, "bob", room, 2).await?;
+    let carol = net_join(&alice, "carol", room, 3).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Bug 1: non-admins must learn each other (the admin relays the roster on accept).
+    assert!(knows(&bob, "carol"), "bob learned carol");
+    assert!(knows(&carol, "bob"), "carol learned bob");
+
+    // Each says one line; with a full mesh everyone receives all three.
+    alice.chat.send_message(&alice.conn, alice.user_id, "alice: hi".to_string()).await?;
+    bob.chat.send_message(&bob.conn, bob.user_id, "bob: hi".to_string()).await?;
+    carol.chat.send_message(&carol.conn, carol.user_id, "carol: hi".to_string()).await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    for n in [&alice, &bob, &carol] {
+        for line in ["alice: hi", "bob: hi", "carol: hi"] {
+            assert_eq!(msg_count(n, line).await?, 1, "[{}] sees {:?} exactly once", n.name, line);
+        }
+    }
+
+    // Bug 2: bob leaves and rejoins, then everyone talks again — no message may duplicate.
+    let bob = rejoin(&alice, bob, room).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    alice.chat.send_message(&alice.conn, alice.user_id, "alice: again".to_string()).await?;
+    bob.chat.send_message(&bob.conn, bob.user_id, "bob: again".to_string()).await?;
+    carol.chat.send_message(&carol.conn, carol.user_id, "carol: again".to_string()).await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for n in [&alice, &bob, &carol] {
+        for line in ["alice: hi", "bob: hi", "carol: hi", "alice: again", "bob: again", "carol: again"] {
+            let c = msg_count(n, line).await?;
+            assert!(c <= 1, "[{}] saw {:?} {} times (duplicated)", n.name, line, c);
+        }
+    }
     Ok(())
 }

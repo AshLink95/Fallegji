@@ -16,7 +16,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::{config::ChatChoice, connection::{Connection, Communication, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, db::Database, vim::{Vim, input_handling}};
+use crate::{config::ChatChoice, connection::{Accepted, ChatSlot, Connection, Communication, Peermap, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, db::Database, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
 use crate::{home, initServer, initClient, chat};
 use crate::config::Config;
@@ -25,20 +25,19 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use tokio_util::sync::CancellationToken;
 
 // admin initialization functions
-type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>>;
+type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>>;
 
 // Admin background tasks: accept direct peer connections, watch our IP, hold the
 // rendezvous (fallback), and read incoming join requests. All cancel via `token`.
-fn admin_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, requests: Requests, token: CancellationToken) {
-    tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
-    let dbc = chat.db.clone(); let mc = Arc::clone(conn); let mt = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip(dbc) => {} } });
-    let fc = Arc::clone(conn); let ft = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
-    let hc = Arc::clone(conn); let ht = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = ht.cancelled() => {} _ = hc.heartbeat_loop() => {} } });
+fn admin_rcv(conn: &Arc<Connection>, slot: ChatSlot, requests: Requests, token: CancellationToken) {
+    member_rcv(conn, slot, token.clone());
     let rc = Arc::clone(conn);
     tokio::spawn(async move { let _ = rc.rcv_requests(requests, token).await; });
+}
+
+/// Wrap an existing chat in a (pre-filled) slot for `listen`.
+fn filled_slot(chat: &Arc<Chat>) -> ChatSlot {
+    Arc::new(Mutex::new(Some(Accepted { chat: Arc::clone(chat), name: String::new(), peer_id: -1 })))
 }
 
 async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, requests: Requests, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
@@ -52,7 +51,7 @@ async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, requests
     conn.bind_rendezvous().await?;
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
-    admin_rcv(&conn, &chat, requests, token);
+    admin_rcv(&conn, filled_slot(&chat), requests, token);
     *ran = false;
     Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
 }
@@ -78,7 +77,7 @@ async fn startstuffold(choice: &str, config: &Config, requests: Requests, token:
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
     chat.send_join(&conn).await?;
-    admin_rcv(&conn, &chat, requests, token);
+    admin_rcv(&conn, filled_slot(&chat), requests, token);
     *ran = false;
     Ok((conn, chat))
 }
@@ -86,33 +85,49 @@ async fn startstuffold(choice: &str, config: &Config, requests: Requests, token:
 // Member background tasks: same as admin but without hosting the rendezvous —
 // peers don't accept join requests, they just listen, watch their IP, and can
 // take over the rendezvous (fallback) if the holder drops. All cancel via `token`.
-fn member_rcv(conn: &Arc<Connection>, chat: &Arc<Chat>, token: CancellationToken) {
-    tokio::spawn(Arc::clone(conn).listen(Arc::clone(chat), token.clone()));
-    let dbc = chat.db.clone(); let mc = Arc::clone(conn); let mt = token.clone();
-    tokio::spawn(async move { tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip(dbc) => {} } });
+fn member_rcv(conn: &Arc<Connection>, slot: ChatSlot, token: CancellationToken) {
+    tokio::spawn(Arc::clone(conn).listen(Arc::clone(&slot), token.clone()));
+    // monitor_ip needs the chat's db; a fresh joiner's chat is only born on accept,
+    // so wait for the slot to fill, then watch the IP.
+    let sc = Arc::clone(&slot); let mc = Arc::clone(conn); let mt = token.clone();
+    tokio::spawn(async move {
+        loop {
+            if mt.is_cancelled() { return; }
+            let db = sc.lock().unwrap().as_ref().map(|a| a.chat.db.clone());
+            if let Some(db) = db {
+                tokio::select! { _ = mt.cancelled() => {} _ = mc.monitor_ip(db) => {} }
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    });
     let fc = Arc::clone(conn); let ft = token.clone();
     tokio::spawn(async move { tokio::select! { _ = ft.cancelled() => {} _ = fc.fallback() => {} } });
     let hc = Arc::clone(conn); let ht = token.clone();
     tokio::spawn(async move { tokio::select! { _ = ht.cancelled() => {} _ = hc.heartbeat_loop() => {} } });
 }
 
-async fn joinstuffnew(choice: &str, user_name: &str, rendezvous: &str, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
+async fn joinstuffnew(user_name: &str, rendezvous: &str, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, ChatSlot, StaticSecret, PublicKey, u64)> {
     if !*ran {
         return Err(anyhow::anyhow!("joinstuffnew already ran"));
     }
+    // Only the connection comes up here; identity is in-memory, the chat is born on accept.
     let (addr, listener) = get_free_port().await?;
-    let (chat, prvkey, pubkey, user_id, peer_id, peermap) = Chat::join(choice, user_name, addr.port()).await?;
-    let mut conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), peermap).await;
-    conn.set_user(user_id, user_name.to_string(), Uid::getuid());
+    let (peer, prvkey) = crate::connection::Peer::new_out(-1, addr.port())?;
+    let pubkey = peer.get_pubkey();
+    let uid = Uid::getuid();
+    let pubkey_hex = hex::encode(pubkey.as_bytes());
+    let user_id = User::new(pubkey_hex, user_name.to_string(), uid).get_id();
+    let mut conn = Connection::new(prvkey.clone(), rendezvous.parse::<SocketAddr>()?, (addr, listener), Peermap::new()).await;
+    conn.set_user(user_id, user_name.to_string(), uid);
     let conn = Arc::new(conn);
-    let chat = Arc::new(chat);
-    member_rcv(&conn, &chat, token); // listen first so we catch the admin's accept (db sync)
-    // Send our join request and wait for the admin to acknowledge receipt.
+    let slot: ChatSlot = Arc::new(Mutex::new(None));
+    member_rcv(&conn, Arc::clone(&slot), token);
     if !conn.snd_requests(user_name.to_string()).await? {
         return Err(anyhow::anyhow!("join request was not acknowledged"));
     }
     *ran = false;
-    Ok((conn, chat, prvkey, pubkey, user_id, peer_id))
+    Ok((conn, slot, prvkey, pubkey, user_id))
 }
 async fn joinstuffold(choice: &str, config: &Config, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>)> {
     if !*ran {
@@ -134,10 +149,10 @@ async fn joinstuffold(choice: &str, config: &Config, token: CancellationToken, r
     conn.set_user(user_id, user_name.clone(), uid);
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
-    member_rcv(&conn, &chat, token);
+    member_rcv(&conn, filled_slot(&chat), token);
     chat.send_join(&conn).await?;
     conn.snd_requests(user_name).await?;
-    conn.send_db_req(&chat).await?;
+    conn.send_db_req(&chat).await?; // send our db (join msg + presence) AND request theirs back
     *ran = false;
     Ok((conn, chat))
 }
@@ -180,6 +195,9 @@ pub async fn app() -> Result<()> {
     // App meat: Connection and Chat (shared with the spawned admin tasks)
     let mut conn: Option<Arc<Connection>> = None;
     let mut chat: Option<Arc<Chat>> = None;
+    // A joiner waits in InitClient until the admin's accept fills this slot with the chat.
+    let mut chat_slot: Option<ChatSlot> = None;
+    let mut join_keys: Option<(StaticSecret, PublicKey, u64)> = None;
     let mut run_once: bool = true;
     let mut token = CancellationToken::new();
 
@@ -188,7 +206,7 @@ pub async fn app() -> Result<()> {
     let mut admin_active_row = false; // notify/kick & accept/delete
     let mut admin_active_col = 0;
     // let token = CancellationToken::new();
-    let requests = Arc::new(Mutex::new(Vec::<([SocketAddr; 3], String, PublicKey)>::new()));
+    let requests = Arc::new(Mutex::new(Vec::<([SocketAddr; 3], String, PublicKey, u32)>::new()));
 
     // regular input box state
     let mut vim_mode = Vim::Normal;
@@ -197,6 +215,8 @@ pub async fn app() -> Result<()> {
     let mut cursor_pos: usize = 0; // cursor position
     let mut persis_y: usize = 0;   // peristant y position
     let mut anim_tick: usize = 0; // client animation tick
+    let mut client_resend_at = std::time::Instant::now(); // join-request resend cooldown
+    let mut client_resend_n: usize = 0;
 
     let mut curr_screen = Screen::Home;
 
@@ -211,14 +231,29 @@ pub async fn app() -> Result<()> {
             }
             conn = None;
             chat = None;
-            home!(terminal, curr_screen, config, choice, chats, conn, chat, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once, requests, token);
+            chat_slot = None;
+            join_keys = None;
+            home!(terminal, curr_screen, config, choice, chats, conn, chat, chat_slot, join_keys, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once, requests, token);
         } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
-            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input);
-        } else if curr_screen == Screen::InitClient { //dbg
-        // } else if curr_screen == Screen::InitClient && let Some(ref chat) = chat
-        //     && let Some(ref conn) = conn {
-            initClient!(terminal, curr_screen, config, rendezvous_input, anim_tick);
+            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input, conn, chat);
+        } else if curr_screen == Screen::InitClient && let Some(ref conn) = conn {
+            // Accepted → enter the chat. Clone, don't take: listen reads it from this slot
+            // every packet, so emptying it would silence all reception.
+            let accepted = chat_slot.as_ref().and_then(|s| {
+                s.lock().unwrap().as_ref().map(|a| (a.chat.clone(), a.name.clone(), a.peer_id))
+            });
+            if let Some((acc_chat, acc_name, acc_peer_id)) = accepted {
+                choice = acc_name.clone();
+                if let Some((prvkey, pubkey, user_id)) = join_keys.take() {
+                    config = Config::save(CONFIG, &acc_name, &user_name_input, &rendezvous_input, user_id, acc_peer_id, pubkey, prvkey)?;
+                }
+                chats = ChatChoice::load(CONFIG)?;
+                chat = Some(acc_chat);
+                curr_screen = Screen::Chat;
+                continue;
+            }
+            initClient!(terminal, curr_screen, config, rendezvous_input, anim_tick, conn, client_resend_at, client_resend_n);
         } else if curr_screen == Screen::Chat && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
             chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);

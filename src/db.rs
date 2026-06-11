@@ -98,6 +98,19 @@ impl Database {
             Ok((peer, prvkey))
         }). await?
     }
+    /// Insert a peer with an already-known keypair (vs `create_peer` which generates one).
+    pub async fn create_peer_with(&self, pubkey: PublicKey, addrs: [SocketAddr; 3], user_id: u64) -> Result<i32> {
+        let conn = Arc::clone(&self.conn);
+        let addr_str = addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
+        task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO peers (user_id, addr, pubkey) VALUES (?1, ?2, ?3)",
+                params![user_id.to_string(), addr_str, pubkey.to_bytes()]
+            )?;
+            Ok::<i32, anyhow::Error>(conn.last_insert_rowid() as i32)
+        }).await?
+    }
     /// Message creation
     /// Create a message. `sent_at = None` lets the DB stamp now (locally composed);
     /// `Some(ts)` preserves a received message's original timestamp.
@@ -109,23 +122,22 @@ impl Database {
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
 
-            match sent_at {
-                Some(ts) => conn.execute(
-                    "INSERT INTO messages (sender_id, contents, sent_at) VALUES (?1, ?2, ?3)",
-                    params![sender_id_str, contents_clone, ts],
-                )?,
-                None => conn.execute(
-                    "INSERT INTO messages (sender_id, contents) VALUES (?1, ?2)",
-                    params![sender_id_str, contents_clone],
-                )?,
-            };
+            // None → fresh nanosecond stamp (local); Some → preserve the sender's. Nanos so
+            // repeated sends don't collide on identity.
+            let ts = sent_at.unwrap_or_else(|| {
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64).unwrap_or(0)
+            });
+            conn.execute(
+                "INSERT INTO messages (sender_id, contents, sent_at) VALUES (?1, ?2, ?3)",
+                params![sender_id_str, contents_clone, ts],
+            )?;
 
             let message_id = conn.last_insert_rowid() as i32;
+            // No JOIN to users: a received message's sender may not be in our users
+            // table yet (sync still in flight) — the row must still persist + read back.
             let mut stmt = conn.prepare(
-                "SELECT m.sent_at
-                 FROM messages m
-                 JOIN users u ON m.sender_id = u.id
-                 WHERE m.id = ?1"
+                "SELECT sent_at FROM messages WHERE id = ?1"
             )?;
 
             // Read back the actual sent_at (DB-stamped or preserved) for the returned Message.
@@ -584,12 +596,7 @@ impl Database {
                 if existing_ids.contains(&id_str) {
                     conn.execute(
                         "UPDATE users SET name = ?1, role = ?2, uid = ?3 WHERE id = ?4",
-                        params![
-                            user.get_name(),
-                            user.get_role().map(|r| r.to_string()),
-                            user.get_uid().as_raw(),
-                            id_str
-                        ],
+                        params![user.get_name(), user.get_role().map(|r| r.to_string()), user.get_uid().as_raw(), id_str],
                     )?;
                 }
             }
@@ -605,12 +612,7 @@ impl Database {
                 if !existing_ids.contains(&id_str) {
                     conn.execute(
                         "INSERT INTO users (id, name, role, uid) VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            id_str,
-                            user.get_name(),
-                            user.get_role().map(|r| r.to_string()),
-                            user.get_uid().as_raw()
-                        ],
+                        params![id_str, user.get_name(), user.get_role().map(|r| r.to_string()), user.get_uid().as_raw()],
                     )?;
                 }
             }
@@ -622,58 +624,47 @@ impl Database {
             Ok(count as usize)
         }).await?
     }
-    /// Saving all peers to DB
+    /// Save all peers, merging by **pubkey** not the autoincrement `id` (every db starts at
+    /// id 1, so id-keying would let a remote peer clobber a local one). SQLite owns the ids.
     pub async fn save_all_peers(&self, peers: Vec<Peer>) -> Result<usize> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
 
-            // Get existing peer IDs
-            let mut stmt = conn.prepare("SELECT id FROM peers")?;
-            let existing_ids: HashSet<i32> = stmt
-                .query_map([], |row| row.get(0))?
+            // Existing peers keyed by pubkey.
+            let mut stmt = conn.prepare("SELECT pubkey FROM peers")?;
+            let existing_pubs: HashSet<Vec<u8>> = stmt
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
                 .collect::<Result<_, _>>()?;
-
-            // Build set of new peer IDs
-            let new_ids: HashSet<i32> = peers.iter()
-                .map(|p| p.get_id())
+            let new_pubs: HashSet<Vec<u8>> = peers.iter()
+                .map(|p| p.get_pubkey().to_bytes().to_vec())
                 .collect();
 
-            // Update existing peers first
+            // Drop peers no longer present in the merged set.
+            for old in existing_pubs.difference(&new_pubs) {
+                conn.execute("DELETE FROM peers WHERE pubkey = ?1", params![old])?;
+            }
+
+            // Upsert each incoming peer by pubkey (update in place, or insert fresh).
             for peer in &peers {
-                let id = peer.get_id();
-                if existing_ids.contains(&id) {
-                    // Update existing
+                let pk = peer.get_pubkey().to_bytes().to_vec();
+                if existing_pubs.contains(&pk) {
                     conn.execute(
-                        "UPDATE peers SET user_id = ?1, addr = ?2, pubkey = ?3, last_heartbeat = ?4 WHERE id = ?5",
+                        "UPDATE peers SET user_id = ?1, addr = ?2, last_heartbeat = ?3 WHERE pubkey = ?4",
                         params![
                             peer.get_user_id().map(|u| u.to_string()),
                             peer.addrs_string(),
-                            peer.get_pubkey().to_bytes(),
                             peer.get_last_heartbeat(),
-                            id
+                            pk
                         ],
                     )?;
-                }
-            }
-
-            // Delete peers not in new set
-            for old_id in existing_ids.difference(&new_ids) {
-                conn.execute("DELETE FROM peers WHERE id = ?1", params![old_id])?;
-            }
-
-            // Insert new peers
-            for peer in &peers {
-                let id = peer.get_id();
-                if !existing_ids.contains(&id) {
-                    // Insert new
+                } else {
                     conn.execute(
-                        "INSERT INTO peers (id, user_id, addr, pubkey, last_heartbeat) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        "INSERT INTO peers (user_id, addr, pubkey, last_heartbeat) VALUES (?1, ?2, ?3, ?4)",
                         params![
-                            id,
                             peer.get_user_id().map(|u| u.to_string()),
                             peer.addrs_string(),
-                            peer.get_pubkey().to_bytes(),
+                            pk,
                             peer.get_last_heartbeat()
                         ],
                     )?;
@@ -762,13 +753,22 @@ impl Database {
     }
 
     /// Replace this DB in-place with a received SQLite snapshot (counterpart to `dump`).
+    /// For a file-backed db we write the image to disk and reopen, so it survives a
+    /// reconnect (e.g. a member rejoining); `:memory:` deserializes in place.
     pub async fn load(&self, bytes: Vec<u8>) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
-            let mut conn = conn.lock().unwrap();
-            let sz = bytes.len();
-            conn.deserialize_read_exact(rusqlite::MAIN_DB, std::io::Cursor::new(bytes), sz, false)?;
-            Ok(())
+            let mut guard = conn.lock().unwrap();
+            let path = guard.path().map(|p| p.to_string()).unwrap_or_default();
+            if path.is_empty() || path == ":memory:" {
+                let sz = bytes.len();
+                guard.deserialize_read_exact(rusqlite::MAIN_DB, std::io::Cursor::new(bytes), sz, false)?;
+            } else {
+                *guard = Connection::open_in_memory()?; // drop the old file handle
+                std::fs::write(&path, &bytes)?;         // the snapshot is a full sqlite file image
+                *guard = Connection::open(&path)?;
+            }
+            Ok::<(), anyhow::Error>(())
         }).await?
     }
 }

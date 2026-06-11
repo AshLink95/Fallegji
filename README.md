@@ -22,6 +22,7 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Macros (might be a stretch)
 
 # General checklist
+- [ ] auto rename when new user shares an existing user's name
 - [ ] make delete db merges only valid from admin (user kicked for example)
 - [ ] send notifications
 - [ ] allow `\` commands in-text

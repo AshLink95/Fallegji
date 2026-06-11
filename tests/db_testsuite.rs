@@ -57,8 +57,8 @@ async fn test_create_read_peer() -> Result<()> {
     
     // Create peer with linked user
     assert!(created.get_id() > 0);
-    assert!(!created.get_addr().ip().is_loopback());
-    assert_eq!(created.get_addr().port(), 6967);
+    assert!(!created.get_addrs()[1].ip().is_loopback());
+    assert_eq!(created.get_addrs()[1].port(), 6967);
     assert_eq!(created.get_user_id(), None);
     assert_eq!(created.get_last_heartbeat(), None);
     let prvkey = prv_key.to_bytes();
@@ -72,7 +72,7 @@ async fn test_create_read_peer() -> Result<()> {
     assert!(read_peer.is_some());
     let peer = read_peer.unwrap();
     assert_eq!(peer.get_id(), peer_id);
-    assert_eq!(peer.get_addr().port(), 6967);
+    assert_eq!(peer.get_addrs()[1].port(), 6967);
     // The db column holds all 3 addresses, and read_peer loads them back.
     assert_eq!(peer.get_addrs(), created.get_addrs(), "all 3 addresses round-trip through the db");
     assert_eq!(peer.get_addrs().len(), 3);
@@ -279,8 +279,8 @@ async fn test_load_all() -> Result<()> { //randomly fails for some bs reason
     // Load all peers
     let peers = db.load_all_peers().await?;
     assert!(peers.len() >= 2);
-    assert!(peers.iter().any(|p| p.get_addr().port() == 8080));
-    assert!(peers.iter().any(|p| p.get_addr().port() == 8081));
+    assert!(peers.iter().any(|p| p.get_addrs()[1].port() == 8080));
+    assert!(peers.iter().any(|p| p.get_addrs()[1].port() == 8081));
     
     // Load all messages (ordered by sent_at)
     let messages = db.load_all_messages().await?;
@@ -338,12 +338,12 @@ async fn test_save_all() -> Result<()> {
     
     // NOW load and verify everything
     
-    // Verify peers
+    // Verify peers. Peers merge by pubkey (ids are db-owned), so identify by pubkey/user.
     let loaded_peers = db.load_all_peers().await?;
     assert_eq!(loaded_peers.len(), 2);
-    assert!(loaded_peers.iter().any(|p| p.get_id() == peer1.get_id() && p.get_user_id() == Some(user1.get_id())));
-    assert!(loaded_peers.iter().any(|p| p.get_id() == peer3.get_id() && p.get_user_id() == Some(user2.get_id())));
-    assert!(!loaded_peers.iter().any(|p| p.get_id() == peer2.get_id()));
+    assert!(loaded_peers.iter().any(|p| p.get_pubkey().as_bytes() == peer1.get_pubkey().as_bytes() && p.get_user_id() == Some(user1.get_id())));
+    assert!(loaded_peers.iter().any(|p| p.get_pubkey().as_bytes() == peer3.get_pubkey().as_bytes() && p.get_user_id() == Some(user2.get_id())));
+    assert!(!loaded_peers.iter().any(|p| p.get_pubkey().as_bytes() == peer2.get_pubkey().as_bytes()));
     
     // Verify users
     let loaded_users = db.load_all_users().await?;
@@ -382,8 +382,39 @@ async fn test_dump_load() -> Result<()> {
     let users = dst.db.load_all_users().await?;
     assert!(users.iter().any(|u| u.get_name() == "alice"), "user survived dump/load");
     let peers = dst.db.load_all_peers().await?;
-    assert!(peers.iter().any(|p| p.get_addr().port() == 9000), "peer survived dump/load");
+    assert!(peers.iter().any(|p| p.get_addrs()[1].port() == 9000), "peer survived dump/load");
     let msgs = dst.db.load_all_messages().await?;
     assert!(msgs.iter().any(|m| m.get_contents() == "hello"), "message survived dump/load");
+    Ok(())
+}
+
+/// load() must persist to disk for a file-backed db, so the data survives a reopen
+/// (a member rejoining). Regression for the in-memory-only deserialize.
+#[tokio::test]
+async fn test_load_persists_to_disk() -> Result<()> {
+    let (src_path, dst_path) = ("loadpersist__src.db", "loadpersist__dst.db");
+    let _ = std::fs::remove_file(src_path);
+    let _ = std::fs::remove_file(dst_path);
+
+    let src = Database::new(src_path)?;
+    let (peer, _) = src.create_peer(9000).await?;
+    let hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = src.create_user(hex, "src_user".to_string(), Uid::getuid()).await?;
+    src.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    let snap = src.dump().await?;
+
+    let dst = Database::new(dst_path)?;
+    dst.load(snap).await?;
+    assert!(dst.load_all_users().await?.iter().any(|u| u.get_name() == "src_user"), "loaded");
+    drop(dst);
+
+    // Reopen the same file: loaded data must still be on disk.
+    let reopened = Database::new(dst_path)?;
+    assert!(reopened.load_all_users().await?.iter().any(|u| u.get_name() == "src_user"),
+        "load persisted across reopen");
+    drop(reopened);
+
+    let _ = std::fs::remove_file(src_path);
+    let _ = std::fs::remove_file(dst_path);
     Ok(())
 }

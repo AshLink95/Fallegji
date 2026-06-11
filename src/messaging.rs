@@ -22,7 +22,8 @@ pub struct Chat {
 
 impl Message {
     pub fn new(id: i32, sender_id: u64, contents: String) -> Self {
-        let sent_at = OffsetDateTime::now_utc().unix_timestamp();
+        // Nanos so repeated identical sends stay distinct (the dedup keys on sent_at).
+        let sent_at = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
         Self { id, sender_id, contents, sent_at }
     }
 
@@ -105,6 +106,35 @@ impl Chat {
             current_user,
             db
         }, prvkey, pubkey, user_id, peer_id, peermap))
+    }
+
+    /// Build the chat from the admin's DB dump (carried by the NWP on accept), registering
+    /// ourselves into it. Returns the chat + our peer id.
+    pub async fn from_accept(chat_name: &str, user_name: &str, prvkey: &StaticSecret, uid: Uid, port: u16, db_bytes: Vec<u8>) -> Result<(Self, i32)> {
+        let db_path = format!("{}__{}.db", user_name, chat_name);
+        let db = Database::new(&db_path)?;
+        db.load(db_bytes).await?; // adopt the admin's DB
+
+        let pubkey = PublicKey::from(prvkey);
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
+        let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
+        let user_id = current_user.get_id();
+        let addrs = crate::connection::local_addrs(port)?;
+        let peer_id = db.create_peer_with(pubkey, addrs, user_id).await?;
+
+        let message_history = db.load_all_messages().await?;
+        let all_users = db.load_all_users().await?;
+        let mut members = HashMap::new();
+        members.insert(0u64, User::sys());
+        for user in all_users { members.insert(user.get_id(), user); }
+        members.insert(user_id, current_user.clone());
+
+        Ok((Self {
+            message_history: Arc::new(RwLock::new(message_history)),
+            members: Arc::new(RwLock::new(members)),
+            current_user,
+            db
+        }, peer_id))
     }
 
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {

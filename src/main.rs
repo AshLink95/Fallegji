@@ -1,7 +1,7 @@
 mod connection;
-mod messaging;  //TODO: dependant on connection
-mod ui_screens; //TODO: dependant on messaging
-mod app;        //TODO: dependant on everything
+mod messaging;
+mod ui_screens;
+mod app;
 
 mod db;
 mod auth;

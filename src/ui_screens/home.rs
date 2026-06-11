@@ -12,7 +12,7 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $chat_slot: ident, $join_keys: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident) => {
         // Validity checks
         let combo_exists = !$chat_name_input.is_empty() && !$user_name_input.is_empty() &&
             $chats.available.contains(&format!("{} @ {}", $user_name_input, $chat_name_input));
@@ -428,17 +428,12 @@ macro_rules! home {
                             match $active_field {
                                 0 if user_name_valid => $active_field = 1,
                                 1 if rendezvous_valid && user_name_valid => {
-                                    // No chat-name field on join; use the rendezvous as a local
-                                    // handle until the admin's db sync renames things.
-                                    $choice = $rendezvous_input.clone();
-                                    let jc = joinstuffnew(&$choice, &$user_name_input, &$rendezvous_input, $token.clone(), &mut $run_once).await?;
+                                    // Joiner brings up only its connection; the chat is created and
+                                    // config saved once the admin accepts (see the InitClient handler).
+                                    let jc = joinstuffnew(&$user_name_input, &$rendezvous_input, $token.clone(), &mut $run_once).await?;
                                     $conn = Some(jc.0);
-                                    $chat = Some(jc.1);
-                                    let prvkey = jc.2;
-                                    let pubkey = jc.3;
-                                    let user_id = jc.4;
-                                    let peer_id = jc.5;
-                                    $config = Config::save(CONFIG, &$choice, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
+                                    $chat_slot = Some(jc.1);
+                                    $join_keys = Some((jc.2, jc.3, jc.4));
                                     $curr_screen = Screen::InitClient;
                                 }
                                 _ => {}

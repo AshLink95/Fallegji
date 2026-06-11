@@ -62,6 +62,40 @@ pub async fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
     None
 }
 
+/// Bind a TCP listener with SO_REUSEADDR so a recently-used port (still in TIME_WAIT)
+/// rebinds without an "address already in use" error.
+pub fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
+    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+
+    let mut port = 1952;
+    let max = 74;
+
+    for _ in 0..max {
+        let addr = SocketAddr::new(ip, port);
+
+        match bind_listener(addr) {
+            Ok(sock) => return Ok((addr, sock)),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                port += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!("Too many ports in use"))
+}
+
+
 /// key generation
 pub trait KeyGen {
     fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
@@ -70,14 +104,20 @@ pub trait KeyGen {
 
 /// user_id -> peer, key, socket
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
-/// Pending join requests awaiting admin accept/reject: (addr, name, pubkey).
-pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey)>>>;
+/// Pending join requests awaiting admin accept/reject: (addrs, name, pubkey, uid).
+pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>>;
+
+/// A joiner's chat is born only once the admin accepts (the NWP carries the DB).
+/// Until then the joiner has just its `Connection` up; `listen` fills this slot.
+pub struct Accepted { pub chat: Arc<Chat>, pub name: String, pub peer_id: i32 }
+pub type ChatSlot = Arc<Mutex<Option<Accepted>>>;
 
 pub struct Connection {
     prvkey: StaticSecret,
     socket: Mutex<(SocketAddr, Arc<TcpListener>)>,
     peers: Arc<Mutex<Peermap>>,
     rendezvous: (SocketAddr, Mutex<Option<Arc<TcpListener>>>),
+    synced: Arc<std::sync::atomic::AtomicBool>, // set when a db_sync is applied
     user: Option<(u64, String, Uid)>,
 }
 
@@ -116,9 +156,9 @@ pub trait RendezVous {
 pub trait Communication {
     /// Accept inbound connections on our bound socket and dispatch decrypted packets.
     /// Stops the accept loop and every per-connection reader when `token` is cancelled.
-    async fn listen(self: Arc<Self>, chat: Arc<Chat>, token: CancellationToken) -> Result<()>;
+    async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()>;
 
-    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, db: &Database) -> Result<()>;
+    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()>;
     async fn read_newpeer(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
 
     async fn send_msg(&self, msg: Message) -> Result<()>;
@@ -134,7 +174,7 @@ pub trait Communication {
     async fn read_db_sync(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
 
     async fn send_db_req(&self, chat: &Chat) -> Result<()>;
-    async fn read_db_req(&self, chat: &Chat) -> Result<()>;
+    async fn read_db_req(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
 }
 
 impl Peer {
@@ -200,7 +240,6 @@ impl Peer {
     pub fn get_id(&self) -> i32 { self.id }
     pub fn get_user_id(&self) -> Option<u64> { self.user_id }
     pub fn get_addrs(&self) -> [SocketAddr; 3] { self.addrs }
-    pub fn get_addr(&self) -> SocketAddr { self.addrs[1] } // the LAN one, for display/back-compat
     pub fn get_pubkey(&self) -> PublicKey { self.pubkey }
     pub fn get_last_heartbeat(&self) -> Option<i64> { self.last_heartbeat }
     pub fn get_last_seen_typing(&self) -> Option<i64> { self.last_seen_typing }
@@ -246,30 +285,6 @@ impl KeyGen for Peer {
     }
 }
 
-pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
-    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-
-    let mut port = 1952;
-    let max = 74;
-
-    for _ in 0..max {
-        let addr = SocketAddr::new(ip, port);
-
-        match TcpListener::bind(addr).await {
-            Ok(sock) => return Ok((addr, sock)),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                port += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Err(anyhow::anyhow!("Too many ports in use"))
-}
-
 impl Connection {
     pub async fn new(prvkey: StaticSecret, rendezvous_addr: SocketAddr, socket: (SocketAddr, TcpListener), peermap: Peermap) -> Self {
         Self {
@@ -277,6 +292,7 @@ impl Connection {
             socket: Mutex::new((socket.0, Arc::new(socket.1))),
             peers: Arc::new(Mutex::new(peermap)),
             rendezvous: (rendezvous_addr, Mutex::new(None)),
+            synced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user: None,
         }
     }
@@ -284,6 +300,14 @@ impl Connection {
     pub fn set_user(&mut self, user_id: u64, name: String, uid: Uid) {
         self.user = Some((user_id, name, uid));
     }
+
+    /// Arm the sync flag, then send a db-sync request to the chat's peers.
+    pub async fn request_sync(&self, chat: &Chat) -> Result<()> {
+        self.synced.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.send_db_req(chat).await
+    }
+    /// True once a db_sync has been applied since the last `request_sync`.
+    pub fn got_sync(&self) -> bool { self.synced.load(std::sync::atomic::Ordering::SeqCst) }
 
     pub async fn monitor_ip(&self, db: Database) -> Result<()> { // bg task
         loop {
@@ -304,7 +328,7 @@ impl Connection {
 
         if lan_ip != curr_ip {
             let addr = SocketAddr::new(lan_ip, port); // keep the chosen port
-            let listener = TcpListener::bind(&addr).await?;
+            let listener = bind_listener(addr)?;
             *self.socket.lock().unwrap() = (addr, Arc::new(listener));
         }
 
@@ -338,7 +362,7 @@ impl Connection {
     pub async fn bind_rendezvous(&self) -> Result<()> {
         let bound = self.rendezvous.1.lock().unwrap().is_some();
         if !bound {
-            let listener = Arc::new(TcpListener::bind(&self.rendezvous.0).await?);
+            let listener = Arc::new(bind_listener(self.rendezvous.0)?);
             *self.rendezvous.1.lock().unwrap() = Some(listener);
         }
         Ok(())
@@ -366,30 +390,106 @@ impl Connection {
         }
     }
 
-    pub fn get_addr(&self) -> SocketAddr { self.socket.lock().unwrap().0 }
-
     /// Our own 3 candidate addresses for the current bind port (public defaults to
     /// LAN; `monitor_ip` refines it via STUN and re-announces).
     fn my_addrs(&self) -> [SocketAddr; 3] {
         let a = self.socket.lock().unwrap().0;
         [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a, a]
     }
-    fn my_addrs_string(&self) -> String {
-        self.my_addrs().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+
+    /// Snapshot of the peermap as (user_id, peer). The caller reads whatever it needs
+    /// (addrs, presence, …) and filters out itself when appropriate.
+    pub fn peer_list(&self) -> Vec<(u64, Peer)> {
+        self.peers.lock().unwrap().iter().map(|(uid, (p, _, _))| (*uid, p.clone())).collect()
     }
 
-    pub fn get_peer(&self, user_id: &u64) -> Option<Peer> {
-        if let Some(peer_entry) = self.peers.lock().unwrap().get(user_id) {
-            return Some(peer_entry.0.clone());
+    /// First NWP for a chat-less joiner: build the chat from the admin's DB, fill the slot
+    /// (the app loop enters the chat), wire up peers, and announce ourselves.
+    pub async fn accept_chat(&self, slot: &ChatSlot, payload: Vec<u8>) -> Result<()> {
+        let (chat_name, db_bytes): (String, Vec<u8>) = serde_json::from_slice(&payload)?;
+        let (_user_id, user_name, uid) = self.user.clone()
+            .ok_or_else(|| anyhow::anyhow!("accept_chat: no local user"))?;
+        let port = self.socket.lock().unwrap().0.port();
+        let (chat, peer_id) = Chat::from_accept(&chat_name, &user_name, &self.prvkey, uid, port, db_bytes).await?;
+        let chat = Arc::new(chat);
+        *slot.lock().unwrap() = Some(Accepted { chat: chat.clone(), name: chat_name, peer_id });
+        self.rebuild_peermap(&chat.db).await?;
+        self.connect_peers().await;          // open outbound streams so messages flow
+        let _ = chat.send_join(self).await;  // record "X joined" (+ best-effort live send)
+        self.send_db_req(&chat).await?;      // send our db (user + join msg) AND request theirs
+        Ok(())
+    }
+
+    /// Rebuild the peermap from the db (deriving each peer's shared key), keeping any
+    /// already-open streams, and re-adding ourselves.
+    pub async fn rebuild_peermap(&self, db: &Database) -> Result<()> {
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let peers = db.load_all_peers().await?;
+        let mut guard = self.peers.lock().unwrap();
+        // Keyed by pubkey (so a temp-id entry's stream carries to its real id), with the old
+        // addr so a changed addr (rejoin on a new port) drops the stream → connect_peers re-dials.
+        let old: HashMap<[u8; 32], ([SocketAddr; 3], Option<Arc<TokioMutex<TcpStream>>>)> =
+            guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone()))).collect();
+        guard.clear();
+        for peer in peers {
+            let uid = match peer.get_user_id() { Some(u) => u, None => continue };
+            if Some(uid) == me { continue; }
+            let key = peer.shrdkeygen(self.prvkey.clone());
+            let stream = match old.get(&peer.get_pubkey().to_bytes()) {
+                Some((old_addrs, s)) if *old_addrs == peer.get_addrs() => s.clone(),
+                _ => None, // new peer, or its address changed → force a fresh dial
+            };
+            guard.insert(uid, (peer, key, stream));
         }
-        None
+        if let Some(my_id) = me {
+            let me_pub = PublicKey::from(&self.prvkey);
+            let me_peer = Peer {
+                id: -1, user_id: Some(my_id), addrs: self.my_addrs(),
+                pubkey: me_pub, last_heartbeat: None, last_seen_typing: None
+            };
+            let me_key = me_peer.shrdkeygen(self.prvkey.clone());
+            guard.insert(my_id, (me_peer, me_key, old.get(&me_pub.to_bytes()).and_then(|(_, s)| s.clone())));
+        }
+        Ok(())
+    }
+
+    /// A known peer re-announced (rejoin / IP change): refresh its address and drop the
+    /// stale stream so `connect_peers` re-dials it.
+    pub async fn reconnect_peer(&self, pubkey: PublicKey, addrs: [SocketAddr; 3]) {
+        {
+            let mut guard = self.peers.lock().unwrap();
+            match guard.values_mut().find(|(p, _, _)| p.get_pubkey().as_bytes() == pubkey.as_bytes()) {
+                Some((p, _, s)) => { p.set_addrs(addrs); *s = None; }
+                None => return,
+            }
+        }
+        self.connect_peers().await;
+    }
+
+    /// Open an outbound stream (trying each peer's 3 addresses) to every peer that
+    /// doesn't have one yet, so messages can actually flow after a sync.
+    pub async fn connect_peers(&self) {
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let to_dial: Vec<(u64, [SocketAddr; 3])> = {
+            self.peers.lock().unwrap().iter()
+                .filter(|(uid, (_, _, s))| Some(**uid) != me && s.is_none())
+                .map(|(uid, (p, _, _))| (*uid, p.get_addrs()))
+                .collect()
+        };
+        for (uid, addrs) in to_dial {
+            if let Some(stream) = connect_any(&addrs).await
+                && let Some(e) = self.peers.lock().unwrap().get_mut(&uid)
+                && e.2.is_none() {
+                    e.2 = Some(Arc::new(TokioMutex::new(stream)));
+            }
+        }
     }
 }
 
 impl Secrecy for Connection {
     fn encode<T: Serialize>(key: &Key, header: u8, plain: T) -> Result<Vec<u8>> {
         let mut packet: Vec<u8> = serde_json::to_vec(&plain)?;
-        if header == DBS_HD || header == NWP_HD {
+        if header == DBS_HD || header == NWP_HD || header == DBR_HD {
             packet = compress_prepend_size(&packet);
         }
         let mut plaintxt: Vec<u8> = Vec::with_capacity(1+packet.len());
@@ -418,7 +518,7 @@ impl Secrecy for Connection {
             return Err(anyhow::anyhow!("Decrypted frame missing header"));
         }
         let header = plaintxt.remove(0);
-        if header == DBS_HD || header == NWP_HD {
+        if header == DBS_HD || header == NWP_HD || header == DBR_HD {
             plaintxt = decompress_size_prepended(&plaintxt)
                 .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
         }
@@ -437,7 +537,7 @@ impl RendezVous for Connection {
                     _ = token.cancelled() => { break; }
                     result = listener.accept() => {
                         match result {
-                            Ok((mut stream, _peer_addr)) => {
+                            Ok((mut stream, peer_addr)) => {
                                 let mut buffer = vec![0u8; 4096];
                                 match stream.read(&mut buffer).await {
                                     Ok(n) if n > 0 => {
@@ -454,9 +554,14 @@ impl RendezVous for Connection {
                                         let name = &payload[..start];
                                         let addr_str = &payload[start+1..end];
                                         let tail = payload[end+1..].trim();
-                                        let pubkey_hex = match tail.strip_suffix("fallegji") {
+                                        let body = match tail.strip_suffix("fallegji") {
                                             Some(p) => p,
                                             None => continue,
+                                        };
+                                        // body = "{pubkey_hex};{uid}"
+                                        let (pubkey_hex, uid_raw) = match body.split_once(';') {
+                                            Some((pk, u)) => (pk, u.parse::<u32>().unwrap_or(0)),
+                                            None => (body, 0),
                                         };
                                         let pubkey = match hex::decode(pubkey_hex)
                                             .ok()
@@ -470,7 +575,27 @@ impl RendezVous for Connection {
                                             Some(a) => a,
                                             None => continue,
                                         };
-                                        requests.lock().unwrap().push((addrs, String::from(name), pubkey));
+                                        // Source IP = joiner's reachable (post-NAT) addr; pair with the
+                                        // announced port and make it primary (tried first, displayed).
+                                        let addrs = [SocketAddr::new(peer_addr.ip(), addrs[1].port()), addrs[1], addrs[2]];
+                                        let my_pub = PublicKey::from(&self.prvkey);
+                                        if pubkey.as_bytes() == my_pub.as_bytes() { continue; } // our own echo
+                                        // Known peer re-announcing (rejoin / IP change): reconnect, don't re-queue.
+                                        let known = self.peers.lock().unwrap().values()
+                                            .any(|(p, _, _)| p.get_pubkey().as_bytes() == pubkey.as_bytes());
+                                        if known {
+                                            self.reconnect_peer(pubkey, addrs).await;
+                                            continue;
+                                        }
+                                        {
+                                            // Dedup by pubkey: a resend updates the addresses instead of stacking.
+                                            let mut guard = requests.lock().unwrap();
+                                            if let Some(existing) = guard.iter_mut().find(|r| r.2.as_bytes() == pubkey.as_bytes()) {
+                                                existing.0 = addrs;
+                                            } else {
+                                                guard.push((addrs, String::from(name), pubkey, uid_raw));
+                                            }
+                                        }
                                         let admin_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
                                         let reply = format!("received[({}, {})]{}fallegji", addr_str, name, admin_pubkey_hex);
                                         let _ = stream.write_all(reply.as_bytes()).await;
@@ -492,11 +617,14 @@ impl RendezVous for Connection {
         let prvkey = self.prvkey.clone();
         let peers = Arc::clone(&self.peers);
         let admin_addr = self.rendezvous.0;
-        let my_addrs_str = self.my_addrs_string();
+        let my_addrs_str = self.my_addrs().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
 
         let mut stream = TcpStream::connect(&admin_addr).await?;
         let my_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
-        let request = format!("{}[{}]{}fallegji", name, my_addrs_str, my_pubkey_hex);
+        // Carry our uid so the admin can construct our exact user-id (= hash(pubkey+name+uid))
+        // and learn us at accept time, instead of waiting on the reverse db sync.
+        let my_uid = self.user.as_ref().map(|(_, _, u)| u.as_raw()).unwrap_or(0);
+        let request = format!("{}[{}]{};{}fallegji", name, my_addrs_str, my_pubkey_hex, my_uid);
         stream.write_all(request.as_bytes()).await?;
         let timeout = tokio::time::Duration::from_secs(5);
         let start_time = tokio::time::Instant::now();
@@ -550,7 +678,7 @@ impl RendezVous for Connection {
     }
 
     async fn fallback_lookup(&self) -> Result<bool> {
-        match TcpListener::bind(&self.rendezvous.0).await {
+        match bind_listener(self.rendezvous.0) {
             Ok(listener) => {
                 *self.rendezvous.1.lock().unwrap() = Some(Arc::new(listener));
                 Ok(true)
@@ -566,7 +694,7 @@ impl RendezVous for Connection {
 }
 
 impl Communication for Connection {
-    async fn listen(self: Arc<Self>, chat: Arc<Chat>, token: CancellationToken) -> Result<()> {
+    async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()> {
         loop {
             let listener = self.socket.lock().unwrap().1.clone();
             let (mut stream, _) = tokio::select! {
@@ -574,7 +702,7 @@ impl Communication for Connection {
                 res = listener.accept() => res?,
             };
             let me = Arc::clone(&self);
-            let chat = Arc::clone(&chat);
+            let slot = Arc::clone(&slot);
             let conn_token = token.clone();
             tokio::spawn(async move {
                 let mut peer_key: Option<(u64, Key)> = None;
@@ -616,61 +744,72 @@ impl Communication for Connection {
                         }
                     };
 
-                    let _ = match header {
-                        MSG_HD => me.read_msg(&chat, payload).await,
-                        HBT_HD => me.read_heartbeat(&chat, peer_id).await,
-                        TYP_HD => me.read_typing(peer_id).await,
-                        DBS_HD => me.read_db_sync(&chat, payload).await,
-                        DBR_HD => me.read_db_req(&chat).await,
-                        NWP_HD => me.read_newpeer(&chat, payload).await,
-                        _ => Ok(()),
+                    // The joiner has no chat until the admin's NWP arrives and creates it.
+                    let chat = slot.lock().unwrap().as_ref().map(|a| a.chat.clone());
+                    let _ = match (header, chat) {
+                        (NWP_HD, None) => me.accept_chat(&slot, payload).await,
+                        (NWP_HD, Some(chat)) => me.read_newpeer(&chat, payload).await,
+                        (_, None) => Ok(()),
+                        (MSG_HD, Some(chat)) => me.read_msg(&chat, payload).await,
+                        (HBT_HD, Some(chat)) => me.read_heartbeat(&chat, peer_id).await,
+                        (TYP_HD, Some(_)) => me.read_typing(peer_id).await,
+                        (DBS_HD, Some(chat)) => me.read_db_sync(&chat, payload).await,
+                        (DBR_HD, Some(chat)) => me.read_db_req(&chat, payload).await,
+                        (_, Some(_)) => Ok(()),
                     };
                 }
             });
         }
     }
 
-    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, db: &Database) -> Result<()> {
-        let shared = self.prvkey.diffie_hellman(&pubkey);
-        let hkdf = Hkdf::<Sha256>::new(None, shared.as_bytes());
-        let mut key_bytes = [0u8; 32];
-        hkdf.expand(b"fallegji", &mut key_bytes).map_err(|e| anyhow::anyhow!("HKDF: {}", e))?;
-        let key = *Key::from_slice(&key_bytes);
-        let frame = Connection::encode(&key, NWP_HD, db.dump().await?)?;
+    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()> {
+        // uid came in the join request, so compute the joiner's exact user-id and learn it
+        // now (no reverse-sync wait — that's why it's never "Unknown").
+        let uid = Uid::from(uid);
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
+        let joiner = User::new(pubkey_hex.clone(), name.to_string(), uid);
+        let joiner_id = joiner.get_id();
+        let peer = Peer { id: -1, user_id: Some(joiner_id), addrs, pubkey, last_heartbeat: None, last_seen_typing: None };
+        let key = peer.shrdkeygen(self.prvkey.clone());
+
+        // chat_name rides along so the joiner can create its db with the right name.
+        let frame = Connection::encode(&key, NWP_HD, (chat_name.to_string(), chat.db.dump().await?))?;
         let mut stream = connect_any(&addrs).await
             .ok_or_else(|| anyhow::anyhow!("could not reach new peer on any address"))?;
         stream.write_all(&(frame.len() as u32).to_be_bytes()).await?;
         stream.write_all(&frame).await?;
+
+        // Write the joiner into our db + members.
+        if !chat.members.read().unwrap().contains_key(&joiner_id) {
+            let _ = chat.db.create_user(pubkey_hex, name.to_string(), uid).await;
+            let _ = chat.db.create_peer_with(pubkey, addrs, joiner_id).await;
+            chat.members.write().unwrap().insert(joiner_id, joiner);
+        }
+        // Key the peer by its real user-id with this (Conn A) stream — outbound to the joiner.
+        self.peers.lock().unwrap().insert(joiner_id, (peer, key, Some(Arc::new(TokioMutex::new(stream)))));
+        // Relay the new roster so existing peers learn the newcomer and mesh (not just a star).
+        self.send_db_sync(&chat.db).await?;
         Ok(())
     }
     async fn read_newpeer(&self, chat: &Chat, payload: Vec<u8>) -> Result<()> {
-        let db_bytes: Vec<u8> = serde_json::from_slice(&payload)?;
+        let (_chat_name, db_bytes): (String, Vec<u8>) = serde_json::from_slice(&payload)?;
         chat.db.load(db_bytes).await?;
-        let me = self.user.as_ref().map(|(id, _, _)| *id);
-        let peers = chat.db.load_all_peers().await?;
-        {
-            let mut guard = self.peers.lock().unwrap();
-            guard.clear();
-            for peer in peers {
-                let uid = match peer.get_user_id() { Some(u) => u, None => continue };
-                if Some(uid) == me { continue; }
-                let key = peer.shrdkeygen(self.prvkey.clone());
-                guard.insert(uid, (peer, key, None));
-            }
-            if let Some(my_id) = me {
-                let me_peer = Peer {
-                    id: -1, user_id: Some(my_id), addrs: self.my_addrs(),
-                    pubkey: PublicKey::from(&self.prvkey), last_heartbeat: None, last_seen_typing: None
-                };
-                let me_key = me_peer.shrdkeygen(self.prvkey.clone());
-                guard.insert(my_id, (me_peer, me_key, None));
-            }
-        }
+        self.rebuild_peermap(&chat.db).await?;
         if let Some((_, my_name, my_uid)) = self.user.clone() {
             let my_pub_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
             let _ = chat.db.create_user(my_pub_hex, my_name, my_uid).await;
         }
+        *chat.message_history.write().unwrap() = chat.db.load_all_messages().await?;
+        let users_now = chat.db.load_all_users().await?;
+        {
+            let mut members = chat.members.write().unwrap();
+            members.clear();
+            members.insert(0u64, User::sys()); // sys has no peer row, so it isn't in load_all_users
+            for u in users_now { members.insert(u.get_id(), u); }
+        }
+        self.connect_peers().await;          // open outbound streams so messages flow
         self.send_db_sync(&chat.db).await?;
+        let _ = chat.send_join(self).await;  // announce ourselves to the chat
         Ok(())
     }
 
@@ -699,9 +838,17 @@ impl Communication for Connection {
         let sender_id = msg.get_sender_id();
         let contents = msg.get_contents();
         let sent_at = msg.get_sent_at();
-        chat.message_history.write().unwrap().push(msg);
+        // Dedup by identity (sender, sent_at, contents): a message can reach us via several
+        // paths. Check + push under one lock so the db save only runs for the first arrival.
+        {
+            let mut hist = chat.message_history.write().unwrap();
+            if hist.iter().any(|m| m.get_sender_id() == sender_id && m.get_sent_at() == sent_at && m.get_contents() == contents) {
+                return Ok(());
+            }
+            hist.push(msg);
+        }
         tokio::spawn(async move {
-            // Preserve the sender's timestamp so the message has a stable cross-peer identity.
+            // Some(sent_at): preserve the sender's stamp (stable cross-peer identity).
             let _ = db.create_message(sender_id, contents, Some(sent_at)).await;
         });
         Ok(())
@@ -810,10 +957,17 @@ impl Communication for Connection {
         let my_users = chat.db.load_all_users().await?;
         let my_peers = chat.db.load_all_peers().await?;
         let my_msgs  = chat.db.load_all_messages().await?;
+        // Did this sync teach us anything new? (drives the gossip re-broadcast below)
+        let my_user_ids: std::collections::HashSet<u64> = my_users.iter().map(|u| u.get_id()).collect();
+        let learned_users = in_users.iter().any(|u| !my_user_ids.contains(&u.get_id()));
+        let my_msgs_len = my_msgs.len();
         let mut users: HashMap<u64, User> = HashMap::new();
         for u in my_users.into_iter().chain(in_users) {
             users.entry(u.get_id()).or_insert(u);
         }
+        // Keep sys (id 0): load_all_users omits it, so the replace-save would DELETE it and
+        // its messages' FK would abort the merge.
+        users.entry(0u64).or_insert_with(User::sys);
         let merged_users: Vec<User> = users.into_values().collect();
         let mut peers: HashMap<u64, Peer> = HashMap::new();
         for p in my_peers.into_iter().chain(in_peers) {
@@ -829,17 +983,31 @@ impl Communication for Connection {
                 merged_msgs.push(nm);
             }
         }
+        let merged_len = merged_msgs.len();
         chat.db.save_all_users(merged_users).await?;
         chat.db.save_all_peers(merged_peers).await?;
         chat.db.save_all_messages(merged_msgs).await?;
         *chat.message_history.write().unwrap() = chat.db.load_all_messages().await?;
         let users_now = chat.db.load_all_users().await?;
-        let mut members = chat.members.write().unwrap();
-        members.clear();
-        for u in users_now { members.insert(u.get_id(), u); }
+        {
+            let mut members = chat.members.write().unwrap();
+            members.clear();
+            members.insert(0u64, User::sys()); // sys has no peer row, so it isn't in load_all_users
+            for u in users_now { members.insert(u.get_id(), u); }
+        }
+        self.rebuild_peermap(&chat.db).await?; // learn any new peer (e.g. an accepted joiner)
+        self.connect_peers().await;            // open outbound streams to them
+        self.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Gossip: re-broadcast only if we learned something new, so a join spreads live and
+        // it terminates once everyone has converged.
+        if learned_users || merged_len > my_msgs_len {
+            let _ = self.send_db_sync(&chat.db).await;
+        }
         Ok(())
     }
 
+    /// Carries our db (so the receiver merges it AND replies with theirs — one round-trip).
+    /// Targets the admin (else any peer) by open stream, not is_online (no heartbeat yet at join).
     async fn send_db_req(&self, chat: &Chat) -> Result<()> {
         let admin_id = chat.get_admin();
         let target: Option<(Key, Arc<TokioMutex<TcpStream>>)> = {
@@ -847,16 +1015,15 @@ impl Communication for Connection {
             let guard = self.peers.lock().unwrap();
             let admin = admin_id
                 .and_then(|aid| guard.get(&aid))
-                .filter(|(p, _, _)| p.is_online())
                 .and_then(|(_, k, s)| s.as_ref().map(|arc| (*k, Arc::clone(arc))));
             admin.or_else(|| guard.iter()
                 .filter(|(uid, _)| Some(**uid) != me)
-                .filter(|(_, (p, _, _))| p.is_online())
                 .find_map(|(_, (_, k, s))| s.as_ref().map(|arc| (*k, Arc::clone(arc)))))
         };
 
         if let Some((key, stream_arc)) = target {
-            let frame = Connection::encode(&key, DBR_HD, ())?;
+            let bytes = chat.db.dump().await?;
+            let frame = Connection::encode(&key, DBR_HD, bytes)?;
             tokio::spawn(async move {
                 let mut s = stream_arc.lock().await;
                 let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
@@ -865,7 +1032,10 @@ impl Communication for Connection {
         }
         Ok(())
     }
-    async fn read_db_req(&self, chat: &Chat) -> Result<()> {
-        self.send_db_sync(&chat.db).await
+    /// Reply with our db, then merge theirs. Reply-first avoids `rebuild_peermap` dropping the
+    /// requester before we answer; order doesn't matter (the merge is a union).
+    async fn read_db_req(&self, chat: &Chat, payload: Vec<u8>) -> Result<()> {
+        self.send_db_sync(&chat.db).await?;
+        self.read_db_sync(chat, payload).await
     }
 }

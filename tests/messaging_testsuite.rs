@@ -1,11 +1,11 @@
 // prompt engineered
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::HashMap, net::SocketAddr, sync::{Arc, RwLock}};
 use tokio::net::TcpListener;
 use fallegji::{
     messaging::{Message, Chat},
     db::Database,
     auth::{User, Uid, Role},
-    connection::{Connection, Peer, KeyGen, get_free_port},
+    connection::{Connection, Peer, KeyGen, Communication, get_free_port},
 };
 use hex::ToHex;
 use anyhow::Result;
@@ -143,5 +143,138 @@ async fn test_chat_join() -> Result<()> {
     drop(chat);
 
     let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Three-copy DB convergence. An admin (alice) + two members (bob, carol), each
+// with its OWN db file, chat in pairs (the third "away", composing locally) and
+// solo, reconciling after each round via the app's real merge handler
+// (read_db_sync). "Convergence" is the distributed-systems sense: three replicas
+// edited independently must reconcile to ONE identical state (same messages +
+// users) — that's what this asserts.
+//
+// Driven directly through read_db_sync (no fire-and-forget sockets or sleeps), so
+// it's deterministic and instant. The live TCP transport is covered separately by
+// connection_testsuite::test_message_exchange.
+// ----------------------------------------------------------------------------
+
+struct Node { conn: Connection, chat: Chat, user_id: u64, db_path: String }
+
+/// Throwaway localhost listener (Connection::new needs one; we never accept on it).
+async fn bind_local() -> Result<(SocketAddr, TcpListener)> {
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = l.local_addr()?;
+    Ok((addr, l))
+}
+
+/// Admin: owns the chat via Chat::new.
+async fn admin(name: &str, room: &str) -> Result<Node> {
+    let (addr, listener) = bind_local().await?;
+    let (chat, prvkey, _pub, user_id, _pid, peermap) = Chat::new(room, name, addr.port()).await?;
+    let mut conn = Connection::new(prvkey, "127.0.0.1:65000".parse().unwrap(), (addr, listener), peermap).await;
+    conn.set_user(user_id, name.to_string(), Uid::getuid());
+    Ok(Node { conn, chat, user_id, db_path: format!("{name}__{room}.db") })
+}
+
+/// Member: db born from the admin's snapshot exactly as acceptance does (from_accept).
+async fn join(admin: &Node, name: &str, room: &str) -> Result<Node> {
+    let (addr, listener) = bind_local().await?;
+    let (_peer, prvkey) = Peer::new_out(-1, addr.port())?;
+    let uid = Uid::getuid();
+    let snapshot = admin.chat.db.dump().await?;
+    let (chat, _pid) = Chat::from_accept(room, name, &prvkey, uid, addr.port(), snapshot).await?;
+    let user_id = chat.current_user.get_id();
+    let mut conn = Connection::new(prvkey, "127.0.0.1:65000".parse().unwrap(), (addr, listener), HashMap::new()).await;
+    conn.set_user(user_id, name.to_string(), uid);
+    Ok(Node { conn, chat, user_id, db_path: format!("{name}__{room}.db") })
+}
+
+/// Author a message straight into a node's own db (what send_message persists locally).
+async fn say(n: &Node, msg: &str) -> Result<()> {
+    let m = n.chat.db.create_message(n.user_id, msg.to_string(), None).await?;
+    n.chat.message_history.write().unwrap().push(m);
+    Ok(())
+}
+
+/// Merge src's whole db into dst through the app's real db-sync handler.
+async fn merge(dst: &Node, src: &Node) -> Result<()> {
+    let payload = serde_json::to_vec(&src.chat.db.dump().await?)?;
+    dst.conn.read_db_sync(&dst.chat, payload).await
+}
+
+/// One reconciliation pass for a star around the admin: gather every member into
+/// the admin, then push the admin's union back out — leaves all copies identical.
+async fn sync(alice: &Node, members: &[&Node]) -> Result<()> {
+    for m in members { merge(alice, m).await?; }
+    for m in members { merge(m, alice).await?; }
+    Ok(())
+}
+
+async fn msg_set(db: &Database) -> Result<Vec<(u64, String, i64)>> {
+    let mut v: Vec<_> = db.load_all_messages().await?
+        .into_iter().map(|m| (m.get_sender_id(), m.get_contents(), m.get_sent_at())).collect();
+    v.sort();
+    Ok(v)
+}
+async fn user_set(db: &Database) -> Result<Vec<(u64, String)>> {
+    let mut v: Vec<_> = db.load_all_users().await?
+        .into_iter().map(|u| (u.get_id(), u.get_name())).collect();
+    v.sort();
+    Ok(v)
+}
+
+#[tokio::test]
+async fn test_three_user_convergence() -> Result<()> {
+    let room = "room";
+    let alice = admin("alice", room).await?;
+    let bob = join(&alice, "bob", room).await?;
+    let carol = join(&alice, "carol", room).await?;
+
+    // Pair (alice, bob); carol away.
+    say(&alice, "alice: hi bob").await?;
+    say(&bob, "bob: hi alice").await?;
+    say(&carol, "carol: noted while AB chatted").await?;
+    sync(&alice, &[&bob, &carol]).await?;
+
+    // Pair (alice, carol); bob away.
+    say(&alice, "alice: hi carol").await?;
+    say(&carol, "carol: hi alice").await?;
+    say(&bob, "bob: noted while AC chatted").await?;
+    sync(&alice, &[&bob, &carol]).await?;
+
+    // Pair (bob, carol); alice away.
+    say(&bob, "bob: hi carol").await?;
+    say(&carol, "carol: hi bob").await?;
+    say(&alice, "alice: noted while BC chatted").await?;
+    sync(&alice, &[&bob, &carol]).await?;
+
+    // Each speaking by themselves, then a final reconciliation.
+    say(&alice, "alice: solo").await?;
+    say(&bob, "bob: solo").await?;
+    say(&carol, "carol: solo").await?;
+    sync(&alice, &[&bob, &carol]).await?;
+
+    // All three copies are now identical (messages + users).
+    let a = msg_set(&alice.chat.db).await?;
+    assert_eq!(a, msg_set(&bob.chat.db).await?, "bob's messages match alice's");
+    assert_eq!(a, msg_set(&carol.chat.db).await?, "carol's messages match alice's");
+
+    let ua = user_set(&alice.chat.db).await?;
+    assert_eq!(ua, user_set(&bob.chat.db).await?, "bob's users match");
+    assert_eq!(ua, user_set(&carol.chat.db).await?, "carol's users match");
+    assert_eq!(ua.len(), 3, "alice, bob, carol all present");
+
+    // Every authored message (pairs + away + solo) reached all three.
+    for content in [
+        "alice: hi bob", "bob: hi alice", "carol: noted while AB chatted",
+        "alice: hi carol", "carol: hi alice", "bob: noted while AC chatted",
+        "bob: hi carol", "carol: hi bob", "alice: noted while BC chatted",
+        "alice: solo", "bob: solo", "carol: solo",
+    ] {
+        assert!(a.iter().any(|(_, c, _)| c == content), "missing message: {content}");
+    }
+
+    for n in [&alice, &bob, &carol] { let _ = std::fs::remove_file(&n.db_path); }
     Ok(())
 }

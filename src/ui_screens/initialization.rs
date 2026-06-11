@@ -1,9 +1,7 @@
 #[macro_export]
 macro_rules! initServer {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident, $conn: ident, $chat: ident) => {
         $terminal.draw(|f| {
-            //TODO: add a way of listening for requests
-            //TODO: send a packet for seen(received) requests
             //TODO: update with actual peers list from connection.
             // Also, find a way to update based on valid packets (heartbeats) received (requests list update and peers online status).
             // Use chat for viewing chat members (peers)
@@ -32,7 +30,19 @@ macro_rules! initServer {
             drop(lines);
 
             // TUI screen separation
-            let peers_count = 0; // TODO: replace with actual count
+            // Connected peers (excludes us): name (from chat members) + reachable addr + online dot.
+            let me = $chat.current_user.get_id();
+            let peers: Vec<(String, std::net::SocketAddr, bool)> = {
+                let members = $chat.members.read().unwrap();
+                $conn.peer_list().into_iter()
+                    .filter(|(uid, _)| *uid != me)
+                    .map(|(uid, p)| {
+                        let name = members.get(&uid).map(|u| u.get_name()).unwrap_or_else(|| "?".to_string());
+                        (name, p.get_addrs()[0], p.is_online())
+                    })
+                    .collect()
+            };
+            let peers_count = peers.len();
             let requests_guard = $requests.lock().unwrap();
             let requests_count = requests_guard.len();
 
@@ -68,9 +78,21 @@ macro_rules! initServer {
                 .style(Style::default().bg($config.bg_color))
                 .title(Line::from(" Chat Members ").alignment(Alignment::Left));
 
-            // TODO: Add actual peers list when available
-            let peers_text = Paragraph::new("No peers available")
-                .style(Style::default().fg($config.border_color).bg($config.bg_color))
+            let peers_lines: Vec<Line> = if peers.is_empty() {
+                vec![Line::from(Span::styled("No peers connected", Style::default().fg($config.border_color)))]
+            } else {
+                peers.iter().map(|(name, addr, online)| {
+                    let (dot_color, status) = if *online { ($config.my_color, "online") } else { ($config.border_color, "offline") };
+                    Line::from(vec![
+                        Span::styled("● ", Style::default().fg(dot_color)),
+                        Span::styled(format!("{name}  "), Style::default().fg($config.users_color)),
+                        Span::styled(format!("{addr} "), Style::default().fg($config.border_color)),
+                        Span::styled(format!("({status})"), Style::default().fg(dot_color)),
+                    ])
+                }).collect()
+            };
+            let peers_text = Paragraph::new(peers_lines)
+                .style(Style::default().bg($config.bg_color))
                 .block(peers_block);
 
             // Requests section
@@ -105,7 +127,7 @@ macro_rules! initServer {
                     )
                     .split(requests_inner);
 
-                for (idx, (addr, name, _pubkey)) in requests_guard.iter().enumerate() {
+                for (idx, (addr, name, _pubkey, _uid)) in requests_guard.iter().enumerate() {
                     let row_active = requests_active && $active_col == idx as i32;
 
                     let button_layout = Layout::default()
@@ -124,7 +146,7 @@ macro_rules! initServer {
                     let text_req_color = if $active_section == 1 { $config.users_color } else { $config.border_color };
                     let name_text = Paragraph::new(format!("{}", name))
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
-                    let addr_text = Paragraph::new(format!("{}", addr[1])) // LAN addr
+                    let addr_text = Paragraph::new(format!("{}", addr[0])) // reachable (post-NAT) addr
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
 
                     let accept_active = row_active && $active_row;
@@ -219,6 +241,18 @@ macro_rules! initServer {
                                 $active_section += 1;
                             }
                         },
+                        KeyCode::Enter if $active_section == 1 => {
+                            // active_row: accept (true) pushes the db to the peer; either way drop the request.
+                            let req = { $requests.lock().unwrap().get($active_col as usize).map(|r| (r.0, r.1.clone(), r.2, r.3)) };
+                            if let Some((addrs, name, pubkey, uid)) = req {
+                                if $active_row {
+                                    let _ = $conn.send_newpeer(addrs, pubkey, &name, uid, &$choice, &$chat).await;
+                                }
+                                let mut g = $requests.lock().unwrap();
+                                if ($active_col as usize) < g.len() { g.remove($active_col as usize); }
+                                if $active_col > 0 && $active_col as usize >= g.len() { $active_col -= 1; }
+                            }
+                        },
                         KeyCode::Enter if $active_section == 2 => {
                             $curr_screen = Screen::Chat;
                         },
@@ -232,10 +266,8 @@ macro_rules! initServer {
 
 #[macro_export]
 macro_rules! initClient {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $rendezvous_input: ident, $anim_tick: ident) => {
-        //TODO: receive a packet when the request is seen(received) by the server/admin
-        //TODO: Allows resending after a cooldown which increases if the user isn't banned.
-        // Said cooldown follows the pattern: 3 increasing shorts, 1 long
+    ($terminal:ident, $curr_screen: ident, $config: ident, $rendezvous_input: ident, $anim_tick: ident, $conn: ident, $resend_at: ident, $resend_n: ident) => {
+            // Transition to the chat is driven by the app loop once the slot fills.
 
             // ASCII art
             let ascii_loop1 = vec![
@@ -357,7 +389,8 @@ macro_rules! initClient {
             ]))
             .style(Style::default().bg($config.bg_color));
 
-            let button_color = $config.my_color; //TODO: bg color when on cd, delete color for Unsend
+            // border color while on cooldown, accent when ready to resend.
+            let button_color = if std::time::Instant::now() < $resend_at { $config.border_color } else { $config.my_color };
             let button_txt   = "Resend Request"; //TODO: Resend Request or Unsend
             let button = Paragraph::new(button_txt)
                 .centered()
@@ -394,6 +427,18 @@ macro_rules! initClient {
                             execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                             $curr_screen = Screen::Home;
                             $config = Config::load(CONFIG, None)?;
+                        },
+                        KeyCode::Enter => {
+                            let now = std::time::Instant::now();
+                            if now >= $resend_at {
+                                let c = std::sync::Arc::clone($conn);
+                                let name = $config.user_name.clone().unwrap_or_default();
+                                tokio::spawn(async move { let _ = c.snd_requests(name).await; });
+                                // 3 increasing shorts (3,6,9s) then 1 long (30s), cycling.
+                                let cd = if $resend_n % 4 == 3 { 30 } else { 3 * ($resend_n % 4 + 1) as u64 };
+                                $resend_at = now + std::time::Duration::from_secs(cd);
+                                $resend_n += 1;
+                            }
                         },
                         _ => {}
                     }
