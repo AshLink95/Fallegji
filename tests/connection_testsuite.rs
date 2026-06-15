@@ -88,7 +88,6 @@ fn test_peer() {
     assert_eq!(peer.get_user_id(), None);
     assert_eq!(peer.get_addrs()[1].port(), 9000);
     assert_eq!(peer.get_last_heartbeat(), None);
-    assert_eq!(peer.get_last_seen_typing(), None);
     assert_ne!(peer.get_addrs()[1].ip(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
     assert_eq!(peer.get_pubkey().as_bytes().len(), 32);
     assert_eq!(prvkey.as_bytes().len(), 32);
@@ -111,7 +110,6 @@ fn test_peer() {
     assert_eq!(imported.get_addrs(), addrs, "all 3 addresses preserved");
     assert_eq!(imported.get_addrs()[1], addrs[1], "get_addr returns the LAN one");
     assert_eq!(imported.get_last_heartbeat(), Some(1234567890));
-    assert_eq!(imported.get_last_seen_typing(), Some(1111));
     assert!(Peer::new_in(2, "x".to_string(), uid, 999, addrs, pubkey, None, None).is_err(),
         "bad user_id rejected");
 
@@ -130,8 +128,6 @@ fn test_peer() {
     assert_eq!(peer.get_addrs(), new_addrs);
     peer.set_last_heartbeat(Some(1));
     assert_eq!(peer.get_last_heartbeat(), Some(1));
-    peer.set_last_seen_typing(Some(2));
-    assert_eq!(peer.get_last_seen_typing(), Some(2));
 
     // presence windows: is_online (3s), is_typing (1s); never-seen → false.
     let now = std::time::SystemTime::now()
@@ -319,8 +315,6 @@ async fn test_connection() -> Result<()> {
     let socket = ephemeral().await?;
     let conn = Connection::new(keypair.1, rendezvous_addr, socket, HashMap::new()).await;
     assert!(conn.bind_rendezvous().await.is_ok(), "Failed to bind rendezvous");
-    conn.end_rendezvous();
-    assert!(conn.bind_rendezvous().await.is_ok(), "Double bind failed");
 
     let db = Database::new(":memory:")?;
     let monitor_handle = tokio::spawn(async move { conn.monitor_ip(db).await });
@@ -495,19 +489,6 @@ async fn test_read_data() -> Result<()> {
     conn.read_db_sync(&chat_b, serde_json::to_vec(&empty)?).await?;
     assert!(chat_b.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "local only"), "conflict not clobbered");
 
-    // read_newpeer: newcomer adopts admin's db.
-    let admin_db = Database::new(":memory:")?;
-    let (ap, _) = admin_db.create_peer(9000).await?;
-    let ap_hex = ap.get_pubkey().to_bytes().encode_hex::<String>();
-    let au = admin_db.create_user(ap_hex, "admin".to_string(), Uid::getuid()).await?;
-    admin_db.update_peer_link_user(ap.get_id(), au.get_id()).await?;
-    let admin_snap = admin_db.dump().await?;
-    let chat_c = test_chat()?;
-    let mut conn2 = bare_conn().await?;
-    conn2.set_user(1, "me".to_string(), Uid::from(1));
-    conn2.read_newpeer(&chat_c, serde_json::to_vec(&("RealChat".to_string(), admin_snap))?).await?;
-    assert!(chat_c.db.load_all_users().await?.iter().any(|u| u.get_name() == "admin"), "newcomer adopted admin db");
-
     // accept_chat: joiner with no chat yet creates it from the admin's db (named with
     // the real chat name) and registers itself; the slot then holds the chat.
     let admin_db2 = Database::new(":memory:")?;
@@ -558,9 +539,14 @@ async fn test_read_presence() -> Result<()> {
     assert!(chat.db.read_peer(peer.get_id()).await?.unwrap().get_last_heartbeat().is_some(), "heartbeat persisted");
 
     // typing: in-memory.
-    assert!(peer_of(&conn, uid).unwrap().get_last_seen_typing().is_none());
+    assert!(!peer_of(&conn, uid).unwrap().is_typing());
     conn.read_typing(uid).await?;
-    assert!(peer_of(&conn, uid).unwrap().get_last_seen_typing().is_some(), "typing set");
+    assert!(peer_of(&conn, uid).unwrap().is_typing(), "typing set");
+
+    // kick: read_kick drops the user + peer (db + peermap) in real time.
+    conn.read_kick(&chat, uid).await?;
+    assert!(chat.db.read_user(uid).await?.is_none(), "kicked user removed from db");
+    assert!(peer_of(&conn, uid).is_none(), "kicked peer removed from peermap");
     Ok(())
 }
 
@@ -686,7 +672,7 @@ async fn test_listen_dispatch() -> Result<()> {
     // Background listen loop.
     let lconn = Arc::clone(&conn);
     let lslot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
-        fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new(), peer_id: -1 }
+        fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new() }
     )));
     tokio::spawn(async move { let _ = lconn.listen(lslot, CancellationToken::new()).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -708,7 +694,7 @@ async fn test_listen_dispatch() -> Result<()> {
     // HBT + TYP dispatched → peer presence updated.
     let p = peer_of(&conn, sid).expect("peer present");
     assert!(p.get_last_heartbeat().is_some(), "heartbeat dispatched");
-    assert!(p.get_last_seen_typing().is_some(), "typing dispatched");
+    assert!(p.is_typing(), "typing dispatched");
     Ok(())
 }
 
@@ -735,7 +721,7 @@ async fn test_message_exchange() -> Result<()> {
     let mut admin_conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, admin_sock, HashMap::new()).await;
     admin_conn.set_user(admin_user.get_id(), "admin".to_string(), Uid::from(1));
     let admin_conn = Arc::new(admin_conn);
-    let admin_slot: ChatSlot = Arc::new(std::sync::Mutex::new(Some(Accepted { chat: admin_chat.clone(), name: String::new(), peer_id: -1 })));
+    let admin_slot: ChatSlot = Arc::new(std::sync::Mutex::new(Some(Accepted { chat: admin_chat.clone(), name: String::new() })));
     tokio::spawn(Arc::clone(&admin_conn).listen(admin_slot, CancellationToken::new()));
 
     // ---- Joiner: real socket, knows admin's key (as snd_requests would set up) + listen ----
@@ -792,6 +778,7 @@ async fn test_message_exchange() -> Result<()> {
     assert!(admin_chat.members.read().unwrap().contains_key(&0u64), "sys user kept in members");
     assert_eq!(admin_db.load_all_peers().await?.len(), 2, "both peers persist (admin + joiner)");
 
+    let _ = std::fs::remove_file("joiner__room.db"); // accept_chat → Chat::join wrote this file
     Ok(())
 }
 
@@ -830,7 +817,7 @@ async fn rejoin(admin: &NetNode, old: NetNode, room: &str) -> Result<NetNode> {
     let conn = std::sync::Arc::new(conn);
     let token = CancellationToken::new();
     let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
-        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&old.chat), name: room.to_string(), peer_id: -1 })));
+        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&old.chat), name: room.to_string() })));
     tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
     conn.connect_peers().await;                                  // we dial everyone
     admin.conn.reconnect_peer(old.pubkey, [addr; 3]).await;      // admin dials us back
@@ -857,7 +844,7 @@ async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
     let conn = std::sync::Arc::new(conn);
     let token = CancellationToken::new();
     let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
-        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&chat), name: room.to_string(), peer_id: -1 })));
+        fallegji::connection::Accepted { chat: std::sync::Arc::clone(&chat), name: room.to_string() })));
     tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
     Ok(NetNode { name: name.into(), conn, chat, addr, pubkey, prvkey: prv, user_id: user.get_id(), uid, token })
 }
@@ -903,9 +890,9 @@ async fn test_net_roster_and_dedup() -> Result<()> {
     assert!(knows(&carol, "bob"), "carol learned bob");
 
     // Each says one line; with a full mesh everyone receives all three.
-    alice.chat.send_message(&alice.conn, alice.user_id, "alice: hi".to_string()).await?;
-    bob.chat.send_message(&bob.conn, bob.user_id, "bob: hi".to_string()).await?;
-    carol.chat.send_message(&carol.conn, carol.user_id, "carol: hi".to_string()).await?;
+    alice.chat.send_message(&alice.conn, alice.user_id, "alice: hi".to_string()).await;
+    bob.chat.send_message(&bob.conn, bob.user_id, "bob: hi".to_string()).await;
+    carol.chat.send_message(&carol.conn, carol.user_id, "carol: hi".to_string()).await;
     tokio::time::sleep(Duration::from_millis(250)).await;
     for n in [&alice, &bob, &carol] {
         for line in ["alice: hi", "bob: hi", "carol: hi"] {
@@ -916,9 +903,9 @@ async fn test_net_roster_and_dedup() -> Result<()> {
     // Bug 2: bob leaves and rejoins, then everyone talks again — no message may duplicate.
     let bob = rejoin(&alice, bob, room).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    alice.chat.send_message(&alice.conn, alice.user_id, "alice: again".to_string()).await?;
-    bob.chat.send_message(&bob.conn, bob.user_id, "bob: again".to_string()).await?;
-    carol.chat.send_message(&carol.conn, carol.user_id, "carol: again".to_string()).await?;
+    alice.chat.send_message(&alice.conn, alice.user_id, "alice: again".to_string()).await;
+    bob.chat.send_message(&bob.conn, bob.user_id, "bob: again".to_string()).await;
+    carol.chat.send_message(&carol.conn, carol.user_id, "carol: again".to_string()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     for n in [&alice, &bob, &carol] {
@@ -927,5 +914,6 @@ async fn test_net_roster_and_dedup() -> Result<()> {
             assert!(c <= 1, "[{}] saw {:?} {} times (duplicated)", n.name, line, c);
         }
     }
+    for f in ["bob__room.db", "carol__room.db"] { let _ = std::fs::remove_file(f); } // joiners' chat dbs
     Ok(())
 }

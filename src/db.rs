@@ -386,10 +386,13 @@ impl Database {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            conn.execute(
-                "DELETE FROM users WHERE id = ?1",
-                params![id.to_string()],
-            )?;
+            // FK is on by default, and a kicked user still has messages (kept, rendered
+            // [REDACTED]) and maybe a peer row referencing it — those would block the delete.
+            // Drop FK just for this statement so the user row goes, orphaning the rest.
+            conn.execute("PRAGMA foreign_keys = OFF", [])?;
+            let res = conn.execute("DELETE FROM users WHERE id = ?1", params![id.to_string()]);
+            conn.execute("PRAGMA foreign_keys = ON", [])?;
+            res?;
             Ok(conn.changes() > 0)
         }).await?
     }

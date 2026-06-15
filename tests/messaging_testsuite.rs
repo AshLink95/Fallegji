@@ -87,13 +87,39 @@ async fn test_send_helpers() -> Result<()> {
     let (chat, uid) = mem_chat().await?;
     let conn = bare_conn().await?;
 
-    chat.send_message(&conn, uid, "hello".to_string()).await?;
+    chat.send_message(&conn, uid, "hello".to_string()).await;
     assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "hello"), "in history");
     assert!(chat.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "hello"), "persisted");
 
-    chat.send_join(&conn).await?;
+    chat.send_join(&conn).await;
     let joined = format!("{} joined the chat", chat.current_user.get_name());
     assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == joined), "join message");
+    Ok(())
+}
+
+/// kick: removes the victim from members + the user DB row, keeps their messages
+/// ([REDACTED] on render), and posts the "kicked out" system message.
+#[tokio::test]
+async fn test_kick() -> Result<()> {
+    let (chat, _admin) = mem_chat().await?;
+    let conn = bare_conn().await?;
+
+    // A victim member with their own peer + message.
+    let (vpeer, _) = chat.db.create_peer(9100).await?;
+    let vhex = vpeer.get_pubkey().to_bytes().encode_hex::<String>();
+    let victim = chat.db.create_user(vhex, "victim".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(vpeer.get_id(), victim.get_id()).await?;
+    let vid = victim.get_id();
+    chat.members.write().unwrap().insert(vid, victim);
+    chat.send_message(&conn, vid, "bye".to_string()).await; // victim's own message
+
+    chat.kick(&conn, vid).await;
+
+    assert!(!chat.members.read().unwrap().contains_key(&vid), "victim removed from members");
+    assert!(chat.db.read_user(vid).await?.is_none(), "victim removed from db (FK refs notwithstanding)");
+    assert!(!chat.db.load_all_peers().await?.iter().any(|p| p.get_user_id() == Some(vid)), "victim peer removed from db");
+    assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "bye"), "victim's message kept");
+    assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents().contains("kicked out")), "kick system message posted");
     Ok(())
 }
 
@@ -124,25 +150,30 @@ async fn test_chat_new_and_old() -> Result<()> {
     Ok(())
 }
 
-/// Chat::join bootstraps a Member (not Admin) with empty history; state arrives later via sync.
+/// Chat::join builds a member's chat from the admin's DB dump: adopts the admin's state and
+/// registers itself (Member, not Admin).
 #[tokio::test]
 async fn test_chat_join() -> Result<()> {
-    let path = "j__jointest.db";
-    let _ = std::fs::remove_file(path);
+    let (admin_db, join_db) = ("a__jointest.db", "b__jointest.db");
+    let _ = std::fs::remove_file(admin_db);
+    let _ = std::fs::remove_file(join_db);
 
-    let (chat, _prv, _pub, user_id, _peer_id, peermap) = Chat::join("jointest", "j", 9100).await?;
-    {
-        let members = chat.members.read().unwrap();
-        assert!(members.contains_key(&user_id), "self is a member");
-        assert!(members.contains_key(&0u64), "sys member");
-    }
+    let (admin, _prv, _pub, admin_id, _pid, _pm) = Chat::new("jointest", "a", 9000).await?;
+    let snapshot = admin.db.dump().await?;
+    drop(admin);
+
+    let (_peer, prvkey) = Peer::new_out(-1, 9100)?;
+    let chat = Chat::join("jointest", "b", &prvkey, Uid::getuid(), 9100, snapshot).await?;
+
+    assert_eq!(chat.current_user.get_name(), "b", "current user is the joiner");
     assert_ne!(chat.current_user.get_role(), Some(Role::Admin), "joiner is not admin");
-    assert!(chat.message_history.read().unwrap().is_empty(), "no history until the admin syncs");
-    assert!(peermap.contains_key(&user_id), "peermap includes self");
-    assert_eq!(chat.current_user.get_id(), user_id, "current user matches returned id");
+    assert!(chat.members.read().unwrap().contains_key(&admin_id), "adopted the admin as a member");
+    assert!(chat.members.read().unwrap().values().any(|u| u.get_name() == "b"), "registered itself");
+    assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents().contains("created by")), "adopted the admin's history");
     drop(chat);
 
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(admin_db);
+    let _ = std::fs::remove_file(join_db);
     Ok(())
 }
 
@@ -177,13 +208,13 @@ async fn admin(name: &str, room: &str) -> Result<Node> {
     Ok(Node { conn, chat, user_id, db_path: format!("{name}__{room}.db") })
 }
 
-/// Member: db born from the admin's snapshot exactly as acceptance does (from_accept).
+/// Member: db born from the admin's snapshot exactly as acceptance does (Chat::join).
 async fn join(admin: &Node, name: &str, room: &str) -> Result<Node> {
     let (addr, listener) = bind_local().await?;
     let (_peer, prvkey) = Peer::new_out(-1, addr.port())?;
     let uid = Uid::getuid();
     let snapshot = admin.chat.db.dump().await?;
-    let (chat, _pid) = Chat::from_accept(room, name, &prvkey, uid, addr.port(), snapshot).await?;
+    let chat = Chat::join(room, name, &prvkey, uid, addr.port(), snapshot).await?;
     let user_id = chat.current_user.get_id();
     let mut conn = Connection::new(prvkey, "127.0.0.1:65000".parse().unwrap(), (addr, listener), HashMap::new()).await;
     conn.set_user(user_id, name.to_string(), uid);

@@ -5,12 +5,13 @@
 /// use ratatui::{
 ///     layout::{Constraint, Direction, Layout, Alignment},
 ///     style::{Color, Style},
-///     widgets::{Block, Borders, Paragraph, BorderType},
+///     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 ///     text::Line,
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident) => {
+        let mut max_offset: u16 = 0;
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -34,13 +35,23 @@ macro_rules! chat {
                     .collect()
             };
             let line_count = (lines.len() as u16 + 2).min($config.max_height + 2);
-            
+
+            let typing: Option<Vec<String>> = {
+                let members = $chat.members.read().unwrap();
+                let names: Vec<String> = $conn.peer_list().into_iter()
+                    .filter(|(_, p)| p.is_typing())
+                    .filter_map(|(id, _)| members.get(&id).map(|u| u.get_name()))
+                    .collect();
+                (!names.is_empty()).then_some(names)
+            };
+
             // TUI screen separation
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                     Constraint::Length(line_count),
                 ])
                 .split(size);
@@ -52,7 +63,7 @@ macro_rules! chat {
             };
 
             // Input Box Scrolling (TODO: make scrolling work by pushing extremes not just bottm line)
-            let mut scroll_offset = 0usize;
+            let mut input_scroll_offset = 0usize;
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
             let newlines_before = chars_before_cursor.iter().filter(|&&c| c == '\n').count();
             let chars_in_current_line = chars_before_cursor.iter().rev()
@@ -60,15 +71,15 @@ macro_rules! chat {
                 .count();
             let visible_height = (line_count.saturating_sub(2)) as usize; // subtract borders
             let cursor_line = newlines_before + (chars_in_current_line as u16 / box_width) as usize;
-            if cursor_line < scroll_offset {
-                scroll_offset = cursor_line;
-            } else if cursor_line >= scroll_offset + visible_height {
-                scroll_offset = cursor_line.saturating_sub(visible_height - 1);
+            if cursor_line < input_scroll_offset {
+                input_scroll_offset = cursor_line;
+            } else if cursor_line >= input_scroll_offset + visible_height {
+                input_scroll_offset = cursor_line.saturating_sub(visible_height - 1);
             }
-            scroll_offset = scroll_offset.min(lines.len().saturating_sub(visible_height));
+            input_scroll_offset = input_scroll_offset.min(lines.len().saturating_sub(visible_height));
 
             // Text & Box
-            let visible_lines = &lines[scroll_offset..(scroll_offset + visible_height).min(lines.len())];
+            let visible_lines = &lines[input_scroll_offset..(input_scroll_offset + visible_height).min(lines.len())];
             let display_text = visible_lines.join("\n");
             let input_box = Paragraph::new(display_text)
                 .block(
@@ -95,21 +106,24 @@ macro_rules! chat {
                 )
                 .style(Style::default().fg($config.text_color).bg($config.bg_color)); // text color
 
-            // Messages section (TODO: make text wrap, show multilines (with clear indicators, exp: line below user name until message end, follow text way of wrapping) add allow scrolling with a clickable sidebar)
+            // Messages section (TODO: make text wrap, show multilines (with clear indicators, exp: line below user name until message end, follow text way of wrapping) add allow scrolling with a clickable sidebar) (also, make it auto scroll if we're at the bottom, namely when someone sends something)
             let message_history = $chat.message_history.read().unwrap();
             let members = $chat.members.read().unwrap();
             let current_user_id = $chat.current_user.get_id();
 
             let message_lines: Vec<Line> = message_history.iter().map(|msg| {
                 let sender_id = msg.get_sender_id();
-                let user_name = members.get(&sender_id)
+                let known = members.get(&sender_id);
+                let user_name = known
                     .map(|u| u.get_name())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                
-                let name_color = if sender_id == current_user_id {
-                    $config.my_color
-                } else if sender_id == 0 {
+                    .unwrap_or_else(|| "[REDACTED]".to_string());
+
+                // Deleted/kicked sender (gone from members) and system messages share the
+                // system color — distinct from live users.
+                let name_color = if known.is_none() || sender_id == 0 {
                     $config.system_color
+                } else if sender_id == current_user_id {
+                    $config.my_color
                 } else {
                     $config.users_color
                 };
@@ -119,16 +133,22 @@ macro_rules! chat {
                     Span::styled(msg.get_contents(), Style::default().fg($config.text_color)),
                 ])
             }).collect();
+            max_offset = message_lines.len().saturating_sub(chunks[1].height as usize) as u16;
+            let eff_offset = $scroll_offset.unwrap_or(max_offset); // None on first draw → bottom
 
             drop(message_history);
             drop(members);
 
-            let messages_widget = Paragraph::new(message_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::NONE)
-                )
-                .style(Style::default().bg($config.bg_color));
+            let messages = Paragraph::new(message_lines)
+                .block(Block::default().borders(Borders::NONE))
+                .style(Style::default().bg($config.bg_color))
+                .scroll((eff_offset, 0));
+
+            let mut scroll_state = ScrollbarState::new(max_offset as usize)
+                .position(eff_offset as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
 
             // Cursor position
             let chars_before_cursor: Vec<char> = $input.chars().take($cursor_pos).collect();
@@ -137,8 +157,8 @@ macro_rules! chat {
                 .take_while(|&&c| c != '\n')
                 .count();
             
-            let cursor_x = chunks[2].x + 1 + (chars_in_current_line as u16 % box_width);
-            let cursor_y = chunks[2].y + 1 + (cursor_line - scroll_offset) as u16;
+            let cursor_x = chunks[3].x + 1 + (chars_in_current_line as u16 % box_width);
+            let cursor_y = chunks[3].y + 1 + (cursor_line - input_scroll_offset) as u16;
 
             // Title
             let title = Block::default()
@@ -147,17 +167,53 @@ macro_rules! chat {
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($choice.clone()).alignment(Alignment::Center));
 
+            // Typing indicator
+            let mut typers: Line = match typing {
+                None => Line::from(""),
+                Some(list) if list.is_empty() => Line::from(""),
+                Some(list) => {
+                    let n = list.len();
+                    let mut spans: Vec<Span> = Vec::new();
+                    for (i, peer) in list.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::raw(if i == n - 1 { " and " } else { ", " }));
+                        }
+                        spans.push(Span::styled(
+                            peer.clone(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    spans.push(Span::raw(if n == 1 { " is typing" } else { " are typing" }));
+                    let mut typing_line = Line::from(spans);
+                    if (typing_line.width() as u16 > chunks[1].width) {
+                        typing_line = Line::from(format!("{} ppl are typing", n));
+                    }
+
+                    typing_line
+                }
+            };
+
             // rendering
             f.render_widget(title, chunks[0]);
-            f.render_widget(messages_widget, chunks[1]);
-            f.render_widget(input_box, chunks[2]);
+            f.render_widget(messages, chunks[1]);
+            f.render_widget(typers, chunks[2]);
+            f.render_widget(input_box, chunks[3]);
+
             f.set_cursor_position((cursor_x, cursor_y)); //ERROR (bugs when newline after wrapping) (up/down don't navigate through wrapped lines)
+            f.render_stateful_widget(
+                scrollbar,
+                chunks[1].inner(Margin { vertical: 1, horizontal: 0 }),
+                &mut scroll_state,
+            );
         })?;
 
         // Handle input keys
         let is_admin = if let Some(role) = $chat.current_user.get_role() {
             role == Role::Admin
         } else { false };
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin);
+        // Work on a concrete offset (first draw → bottom), then persist it back into the Option.
+        let mut offset = $scroll_offset.unwrap_or(max_offset);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin, offset, max_offset);
+        $scroll_offset = Some(offset);
     };
 }

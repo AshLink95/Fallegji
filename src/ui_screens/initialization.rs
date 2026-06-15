@@ -1,10 +1,8 @@
+//TODO: have the rendezvous address displayed in initAdmin
 #[macro_export]
-macro_rules! initServer {
+macro_rules! initAdmin {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident, $conn: ident, $chat: ident) => {
         $terminal.draw(|f| {
-            //TODO: update with actual peers list from connection.
-            // Also, find a way to update based on valid packets (heartbeats) received (requests list update and peers online status).
-            // Use chat for viewing chat members (peers)
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
 
@@ -30,15 +28,14 @@ macro_rules! initServer {
             drop(lines);
 
             // TUI screen separation
-            // Connected peers (excludes us): name (from chat members) + reachable addr + online dot.
             let me = $chat.current_user.get_id();
-            let peers: Vec<(String, std::net::SocketAddr, bool)> = {
+            let peers: Vec<(String, std::net::SocketAddr, bool, Option<i64>)> = {
                 let members = $chat.members.read().unwrap();
                 $conn.peer_list().into_iter()
                     .filter(|(uid, _)| *uid != me)
                     .map(|(uid, p)| {
-                        let name = members.get(&uid).map(|u| u.get_name()).unwrap_or_else(|| "?".to_string());
-                        (name, p.get_addrs()[0], p.is_online())
+                        let name = members.get(&uid).map(|u| u.get_name()).unwrap_or_else(|| "UNKNOWN".to_string());
+                        (name, p.get_addrs()[0], p.is_online(), p.get_last_heartbeat())
                     })
                     .collect()
             };
@@ -56,6 +53,7 @@ macro_rules! initServer {
                     Constraint::Length(peers_height),
                     Constraint::Length(requests_height),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                     Constraint::Length(line_count),
                 ])
                 .split(size);
@@ -67,33 +65,65 @@ macro_rules! initServer {
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($choice.clone()).alignment(Alignment::Center));
 
-            // Peers section
+            let is_red = match $config.my_color {
+                Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => true,
+                _ => false,
+            };
+
+            // Peers section — each row's "Kick" button sits in the last 20% column, aligned
+            // with the requests' Delete button below.
             let peers_active = $active_section == 0;
             let peers_border_color = if peers_active { $config.text_color } else { $config.border_color };
-
             let peers_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type($config.border_style)
                 .border_style(Style::default().fg(peers_border_color))
                 .style(Style::default().bg($config.bg_color))
                 .title(Line::from(" Chat Members ").alignment(Alignment::Left));
+            let peers_inner = peers_block.inner(chunks[1]);
+            f.render_widget(peers_block, chunks[1]);
 
-            let peers_lines: Vec<Line> = if peers.is_empty() {
-                vec![Line::from(Span::styled("No peers connected", Style::default().fg($config.border_color)))]
+            if peers.is_empty() {
+                f.render_widget(
+                    Paragraph::new("No peers connected").style(Style::default().fg($config.border_color).bg($config.bg_color)),
+                    peers_inner,
+                );
             } else {
-                peers.iter().map(|(name, addr, online)| {
-                    let (dot_color, status) = if *online { ($config.my_color, "online") } else { ($config.border_color, "offline") };
-                    Line::from(vec![
-                        Span::styled("● ", Style::default().fg(dot_color)),
+                let peer_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(peers.iter().map(|_| Constraint::Length(1)).collect::<Vec<_>>())
+                    .split(peers_inner);
+                for (idx, (name, addr, online, last_hb)) in peers.iter().enumerate() {
+                    let row_active = peers_active && $active_col == idx as i32;
+                    let cols = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+                        .split(peer_chunks[idx]);
+                    let status = if *online {
+                        "online".to_string()
+                    } else {
+                        match (*last_hb).and_then(|ts| time::OffsetDateTime::from_unix_timestamp(ts).ok()) {
+                            Some(d) => format!("offline since {:04}-{:02}-{:02} {:02}:{:02}", d.year(), u8::from(d.month()), d.day(), d.hour(), d.minute()),
+                            None => "offline".to_string(),
+                        }
+                    };
+                    let info = Paragraph::new(Line::from(vec![
+                        Span::styled("● ", Style::default().fg(if *online { $config.online_color } else { $config.border_color })),
                         Span::styled(format!("{name}  "), Style::default().fg($config.users_color)),
                         Span::styled(format!("{addr} "), Style::default().fg($config.border_color)),
-                        Span::styled(format!("({status})"), Style::default().fg(dot_color)),
-                    ])
-                }).collect()
-            };
-            let peers_text = Paragraph::new(peers_lines)
-                .style(Style::default().bg($config.bg_color))
-                .block(peers_block);
+                        Span::styled(format!("({status})"), Style::default().fg($config.border_color)),
+                    ])).style(Style::default().bg($config.bg_color));
+                    let kick_color = if row_active { if !is_red { Color::Red } else { Color::Rgb(255, 100, 0) } } else { $config.border_color };
+                    let kick = Paragraph::new("Kick")
+                        .centered()
+                        .style(Style::default().fg($config.text_color).bg(kick_color))
+                        .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
+                            .border_type($config.border_style)
+                            .style(Style::default().fg(kick_color).bg($config.bg_color)));
+                    f.render_widget(info, cols[0]);
+                    f.render_widget(kick, cols[1]);
+                }
+            }
 
             // Requests section
             let requests_active = $active_section == 1;
@@ -104,11 +134,6 @@ macro_rules! initServer {
                 .border_style(Style::default().fg(requests_border_color))
                 .style(Style::default().bg($config.bg_color))
                 .title(Line::from(" Requests ").alignment(Alignment::Left));
-
-            let is_red = match $config.my_color {
-                Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => true,
-                _ => false,
-            };
 
             let requests_inner = requests_block.inner(chunks[2]);
             f.render_widget(requests_block, chunks[2]);
@@ -201,8 +226,8 @@ macro_rules! initServer {
 
             // rendering
             f.render_widget(title, chunks[0]);
-            f.render_widget(peers_text, chunks[1]);
-            f.render_widget(button, chunks[4]);
+            f.render_widget(Paragraph::new($conn.rendezvous_addr().to_string()).alignment(Alignment::Center).style(Style::default().fg($config.border_color).bg($config.bg_color)), chunks[4]);
+            f.render_widget(button, chunks[5]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -212,15 +237,18 @@ macro_rules! initServer {
                         KeyCode::Char(aq) if key.modifiers.contains(KeyModifiers::CONTROL) && aq == 'a' || aq == 'q'=> {
                             $curr_screen = Screen::Chat;
                         },
-                        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
+                        KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::CONTROL) && ($active_section == 0 || $active_section == 1) => {
                             if $active_col > 0 {
                                 $active_col -= 1;
                             }
                         },
-                        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) && $active_section == 1 => {
-                            let requests_guard = $requests.lock().unwrap();
-                            let max_row = requests_guard.len() as i32 - 1;
-                            drop(requests_guard);
+                        KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::CONTROL) && ($active_section == 0 || $active_section == 1) => {
+                            let max_row = if $active_section == 0 {
+                                let me = $chat.current_user.get_id();
+                                $conn.peer_list().iter().filter(|(uid, _)| *uid != me).count() as i32 - 1
+                            } else {
+                                $requests.lock().unwrap().len() as i32 - 1
+                            };
                             if $active_col < max_row {
                                 $active_col += 1;
                             }
@@ -239,6 +267,15 @@ macro_rules! initServer {
                         KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) && $active_section < 2 => {
                             if $active_section < 2 {
                                 $active_section += 1;
+                            }
+                        },
+                        KeyCode::Enter if $active_section == 0 => {
+                            // kick the selected peer (same peer_list order the row render uses).
+                            let me = $chat.current_user.get_id();
+                            let ids: Vec<u64> = $conn.peer_list().into_iter().filter(|(uid, _)| *uid != me).map(|(uid, _)| uid).collect();
+                            if let Some(&uid) = ids.get($active_col as usize) {
+                                $chat.kick($conn, uid).await;
+                                $active_col = $active_col.min((ids.len() as i32 - 2).max(0));
                             }
                         },
                         KeyCode::Enter if $active_section == 1 => {
@@ -265,10 +302,8 @@ macro_rules! initServer {
 }
 
 #[macro_export]
-macro_rules! initClient {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $rendezvous_input: ident, $anim_tick: ident, $conn: ident, $resend_at: ident, $resend_n: ident) => {
-            // Transition to the chat is driven by the app loop once the slot fills.
-
+macro_rules! initMember {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $rendezvous_input: ident, $anim_tick: ident, $conn: ident, $resend_at: ident, $resend_n: ident, $my_addrs: ident) => {
             // ASCII art
             let ascii_loop1 = vec![
 "                                                                            .+##    ##           ",
@@ -380,18 +415,18 @@ macro_rules! initClient {
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($rendezvous_input.clone()).alignment(Alignment::Center));
 
-            let status_color = $config.border_color; //TODO: my_color for seen, delete color for blocked or deleted
-            let status_txt = "sent"; // TODO: (after 10 seconds, tell the client that the address is not valid), seen, deleted or blocked
-            let status_anim = String::from(".").repeat(($anim_tick/2) % 3 + 1);
-            let status = Paragraph::new(Line::from(vec![
-                Span::styled("status: ", Style::default().fg($config.border_color).bg($config.bg_color)),
-                Span::styled(format!("{status_txt}{status_anim}"), Style::default().fg(status_color).bg($config.bg_color)),
-            ]))
-            .style(Style::default().bg($config.bg_color));
+            let addr_strs: [String; 3] = match $my_addrs {
+                Some(a) => [a[0].to_string(), a[1].to_string(), a[2].to_string()],
+                None => [String::new(), "resolving…".to_string(), String::new()],
+            };
+            let addrs = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
+                .split(chunks[2]);
 
             // border color while on cooldown, accent when ready to resend.
             let button_color = if std::time::Instant::now() < $resend_at { $config.border_color } else { $config.my_color };
-            let button_txt   = "Resend Request"; //TODO: Resend Request or Unsend
+            let button_txt   = "Resend";
             let button = Paragraph::new(button_txt)
                 .centered()
                 .style(Style::default().fg($config.text_color).bg(button_color))
@@ -413,7 +448,14 @@ macro_rules! initClient {
 
             f.render_widget(title, chunks[0]);
             f.render_widget(anim, chunks[1]);
-            f.render_widget(status, chunks[2]);
+            for (col, s) in addrs.iter().zip(addr_strs.iter()) {
+                f.render_widget(
+                    Paragraph::new(s.clone())
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg($config.border_color).bg($config.bg_color)),
+                    *col,
+                );
+            }
             f.render_widget(button, chunks[3]);
         })?;
 

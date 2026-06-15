@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::{Path, PathBuf}};
 use std::fs;
 use std::net::SocketAddr;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::StaticSecret;
 use anyhow::Result;
 use hex::{encode, decode};
 
@@ -44,9 +44,6 @@ pub struct TomlConfig {
     #[serde(default)]
     pub online_color: Option<(u8, u8, u8)>,
 
-    #[serde(default)]
-    pub time_color: Option<(u8, u8, u8)>,
-
     // Chat-specific sections
     #[serde(flatten)]
     pub chats: HashMap<String, ChatConfig>,
@@ -56,9 +53,7 @@ pub struct TomlConfig {
 pub struct ChatConfig {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
-    pub peer_id: Option<i32>,
     pub rendezvous: Option<SocketAddr>,
-    pub pubkey: Option<String>,
     pub prvkey: Option<String>,
 
     // Optional overrides for cosmetic configs
@@ -73,7 +68,6 @@ pub struct ChatConfig {
     pub my_color: Option<(u8, u8, u8)>,
     pub system_color: Option<(u8, u8, u8)>,
     pub online_color: Option<(u8, u8, u8)>,
-    pub time_color: Option<(u8, u8, u8)>,
 }
 
 pub struct ChatChoice { //TODO: need to include the username in that chat
@@ -85,9 +79,7 @@ pub struct ChatChoice { //TODO: need to include the username in that chat
 pub struct Config {
     pub user_id: Option<u64>,
     pub user_name: Option<String>,
-    pub peer_id: Option<i32>,
     pub rendezvous: Option<SocketAddr>,
-    pub pubkey: Option<PublicKey>,
     pub prvkey: Option<StaticSecret>,
 
     pub border_style: BorderType,
@@ -102,7 +94,6 @@ pub struct Config {
     pub my_color: Color,
     pub system_color: Color,
     pub online_color: Color,
-    pub time_color: Color,
 }
 
 // Default functions for serde
@@ -168,9 +159,7 @@ impl Config {
         Self {
             user_id: None,
             user_name: Some(String::from("Me")),
-            peer_id: None,
             rendezvous: None,
-            pubkey: None,
             prvkey: None,
             border_style: BorderType::Rounded,
             max_height: 5,
@@ -183,7 +172,6 @@ impl Config {
             my_color: Color::Green,
             system_color: Color::DarkGray,
             online_color: Color::Green,
-            time_color: Color::DarkGray,
         }
     }
 
@@ -210,14 +198,6 @@ impl Config {
             .and_then(|c| c.max_height)
             .unwrap_or(toml.max_height);
 
-        let pubkey = chat_config
-            .and_then(|c| c.pubkey.as_ref())
-            .and_then(|s| decode(s).ok())
-            .and_then(|bytes| {
-                let arr: [u8; 32] = bytes.try_into().ok()?;
-                Some(PublicKey::from(arr))
-            });
-
         let prvkey = chat_config
             .and_then(|c| c.prvkey.as_ref())
             .and_then(|s| decode(s).ok())
@@ -229,9 +209,7 @@ impl Config {
         Self {
             user_id: chat_config.and_then(|c| c.user_id),
             user_name: chat_config.and_then(|c| c.user_name.clone()),
-            peer_id: chat_config.and_then(|c| c.peer_id),
             rendezvous: chat_config.and_then(|c| c.rendezvous),
-            pubkey,
             prvkey,
 
             border_style: parse_border_style(border_style_str),
@@ -282,16 +260,11 @@ impl Config {
                 toml.online_color,
                 Color::Green
             ),
-            time_color: get_color(
-                chat_config.map(|c| c.time_color),
-                toml.time_color,
-                Color::DarkGray
-            ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn save<P: AsRef<Path>>(path: P, chat_name: &str, user_name: &str, rendezvous: &str, user_id: u64, peer_id: i32, pubkey: PublicKey, prvkey: StaticSecret) -> Result<Self> {
+    pub fn save<P: AsRef<Path>>(path: P, chat_name: &str, user_name: &str, rendezvous: &str, user_id: u64, prvkey: StaticSecret) -> Result<Self> {
         // Load existing config or create new
         let mut toml_config = if path.as_ref().exists() {
             let content = fs::read_to_string(&path)?;
@@ -307,7 +280,6 @@ impl Config {
                 my_color: None,
                 system_color: None,
                 online_color: None,
-                time_color: None,
                 chats: HashMap::new(),
             })
         } else {
@@ -323,7 +295,6 @@ impl Config {
                 my_color: None,
                 system_color: None,
                 online_color: None,
-                time_color: None,
                 chats: HashMap::new(),
             }
         };
@@ -339,9 +310,7 @@ impl Config {
         let chat_config = ChatConfig {
             user_id: Some(user_id),
             user_name: Some(String::from(user_name)),
-            peer_id: Some(peer_id),
             rendezvous: Some(rendezvous.parse::<SocketAddr>()?),
-            pubkey: Some(encode(pubkey.as_bytes())),
             prvkey: Some(encode(prvkey.as_bytes())),
             border_style: None, // Don't save cosmetic overrides by default
             max_height: None,
@@ -354,7 +323,6 @@ impl Config {
             my_color: None,
             system_color: None,
             online_color: None,
-            time_color: None,
         };
         toml_config.chats.insert(display_key, chat_config);
 
@@ -364,9 +332,7 @@ impl Config {
         Ok(Self {
             user_id: Some(user_id),
             user_name: Some(String::from(user_name)),
-            peer_id: Some(peer_id),
             rendezvous: Some(rendezvous.parse::<SocketAddr>()?),
-            pubkey: Some(pubkey),
             prvkey: Some(prvkey),
             border_style: parse_border_style(&toml_config.border_style),
             max_height: toml_config.max_height,
@@ -379,7 +345,6 @@ impl Config {
             my_color: toml_config.my_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Green),
             system_color: toml_config.system_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
             online_color: toml_config.online_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Green),
-            time_color: toml_config.time_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
         })
     }
 }

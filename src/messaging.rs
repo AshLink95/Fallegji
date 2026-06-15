@@ -41,7 +41,7 @@ impl Chat {
         let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
 
-        let (peer, prvkey) = db.create_peer(port).await?;
+        let (mut peer, prvkey) = db.create_peer(port).await?;
         let peer_id = peer.get_id();
         let pubkey = peer.get_pubkey();
         let pubkey_hex = hex::encode(pubkey.as_bytes());
@@ -52,6 +52,7 @@ impl Chat {
         let user_id = current_user.get_id();
         db.update_user_role(user_id, Role::Admin).await?;
         db.update_peer_link_user(peer.get_id(), user_id).await?;
+        peer.set_user_id(user_name.to_string(), user_id, uid)?;
 
         db.delete_user(0).await?;
         let sys = db.create_sys().await?;
@@ -73,54 +74,21 @@ impl Chat {
             db
         }, prvkey, pubkey, user_id, peer_id, peermap))
     }
-
-    /// Non-admin joiner: like `new`, but the local user is a Member and there's no
-    /// "created" notice. Real chat state arrives via the admin's DB sync once accepted.
-    pub async fn join(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, PublicKey, u64, i32, Peermap)> {
-        let db_path = format!("{}__{}.db", user_name, chat_name);
-        let db = Database::new(&db_path)?;
-
-        let (peer, prvkey) = db.create_peer(port).await?;
-        let peer_id = peer.get_id();
-        let pubkey = peer.get_pubkey();
-        let pubkey_hex = hex::encode(pubkey.as_bytes());
-
-        let uid = Uid::getuid();
-        let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
-        let user_id = current_user.get_id();
-        db.update_peer_link_user(peer.get_id(), user_id).await?;
-
-        db.delete_user(0).await?;
-        let sys = db.create_sys().await?;
-        let mut members = HashMap::new();
-        members.insert(user_id, current_user.clone());
-        members.insert(0u64, sys);
-
-        let mut peermap = Peermap::new();
-        let self_key = peer.shrdkeygen(prvkey.clone());
-        peermap.insert(user_id, (peer.clone(), self_key, None));
-
-        Ok((Self {
-            message_history: Arc::new(RwLock::new(Vec::new())),
-            members: Arc::new(RwLock::new(members)),
-            current_user,
-            db
-        }, prvkey, pubkey, user_id, peer_id, peermap))
-    }
-
-    /// Build the chat from the admin's DB dump (carried by the NWP on accept), registering
-    /// ourselves into it. Returns the chat + our peer id.
-    pub async fn from_accept(chat_name: &str, user_name: &str, prvkey: &StaticSecret, uid: Uid, port: u16, db_bytes: Vec<u8>) -> Result<(Self, i32)> {
+    /// Non-admin joiner: build the chat from the admin's DB dump (carried by the NWP on
+    /// accept), registering ourselves into it. Returns the chat + our peer id.
+    pub async fn join(chat_name: &str, user_name: &str, prvkey: &StaticSecret, uid: Uid, port: u16, db_bytes: Vec<u8>) -> Result<Self> {
         let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
         db.load(db_bytes).await?; // adopt the admin's DB
 
         let pubkey = PublicKey::from(prvkey);
         let pubkey_hex = hex::encode(pubkey.as_bytes());
-        let current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
+        let mut current_user = db.create_user(pubkey_hex, user_name.to_string(), uid).await?;
         let user_id = current_user.get_id();
+        current_user.set_role(Role::Member);
+        db.update_user_role(user_id, Role::Member).await?;
         let addrs = crate::connection::local_addrs(port)?;
-        let peer_id = db.create_peer_with(pubkey, addrs, user_id).await?;
+        db.create_peer_with(pubkey, addrs, user_id).await?;
 
         let message_history = db.load_all_messages().await?;
         let all_users = db.load_all_users().await?;
@@ -129,12 +97,12 @@ impl Chat {
         for user in all_users { members.insert(user.get_id(), user); }
         members.insert(user_id, current_user.clone());
 
-        Ok((Self {
+        Ok(Self {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
             current_user,
             db
-        }, peer_id))
+        })
     }
 
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {
@@ -186,15 +154,36 @@ impl Chat {
         ).map(|(id, _)| *id)
     }
 
-    pub async fn send_message(&self, conn: &Connection, sender_id: u64, contents: String) -> Result<()> {
-        let message = self.db.create_message(sender_id, contents, None).await?;
+    pub async fn send_message(&self, conn: &Connection, sender_id: u64, contents: String) {
+        let message = match self.db.create_message(sender_id, contents, None).await {
+            Ok(msg) => msg,
+            Err(_) => return,
+        };
         self.message_history.write().unwrap().push(message.clone());
-        conn.send_msg(message).await?;
-        Ok(())
+        let _ = conn.send_msg(message).await;
     }
 
-    pub async fn send_join(&self, conn: &Connection) -> Result<()> {
+    pub async fn send_join(&self, conn: &Connection) {
         let user_name = self.current_user.get_name();
-        self.send_message(conn, 0, format!("{} joined the chat", user_name)).await
+        self.send_message(conn, 0, format!("{} joined the chat", user_name)).await;
+    }
+
+    /// Admin kick: drop the peer from the db (peer + user), the members list, and the
+    /// connection's peermap (rebuilt from the db), then post a "<name> kicked out" system
+    /// message and sync. (Additive sync can re-merge the record until proper delete-sync; the
+    /// disconnect is immediate. delete_user is best-effort — their messages' FK may block it.)
+    pub async fn kick(&self, conn: &Connection, user_id: u64) {
+        let name = self.members.read().unwrap().get(&user_id).map(|u| u.get_name()).unwrap_or_default();
+        // The peermap's peer often carries id -1; the real rowid lives in the db.
+        let peer_db_id = self.db.load_all_peers().await.ok()
+            .and_then(|ps| ps.into_iter().find(|p| p.get_user_id() == Some(user_id)).map(|p| p.get_id()));
+        // Announce the kick to all peers first (while the kicked peer's stream still exists for
+        // the others), then drop them locally. send_kick makes every receiver delete in real time.
+        self.send_message(conn, 0, format!("{} has been kicked out", name)).await;
+        let _ = conn.send_kick(user_id).await;
+        self.members.write().unwrap().remove(&user_id);
+        if let Some(pid) = peer_db_id { let _ = self.db.delete_peer(pid).await; }
+        let _ = self.db.delete_user(user_id).await;
+        let _ = conn.rebuild_peermap(&self.db).await;
     }
 }

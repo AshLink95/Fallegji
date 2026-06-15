@@ -9,16 +9,16 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Alignment},
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    layout::{Constraint, Direction, Layout, Margin, Alignment},
+    style::{Color, Style, Modifier},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     text::{Line, Span},
     Terminal,
 };
 
 use crate::{config::ChatChoice, connection::{Accepted, ChatSlot, Connection, Communication, Peermap, RendezVous, get_free_port}, messaging::Chat, auth::{Role, Uid, User, Authentication}, db::Database, vim::{Vim, input_handling}};
 use crate::ui_screens::Screen;
-use crate::{home, initServer, initClient, chat};
+use crate::{home, initAdmin, initMember, chat};
 use crate::config::Config;
 
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -37,7 +37,7 @@ fn admin_rcv(conn: &Arc<Connection>, slot: ChatSlot, requests: Requests, token: 
 
 /// Wrap an existing chat in a (pre-filled) slot for `listen`.
 fn filled_slot(chat: &Arc<Chat>) -> ChatSlot {
-    Arc::new(Mutex::new(Some(Accepted { chat: Arc::clone(chat), name: String::new(), peer_id: -1 })))
+    Arc::new(Mutex::new(Some(Accepted { chat: Arc::clone(chat), name: String::new() })))
 }
 
 async fn startstuffnew(choice: &str, user_name: &str, rendezvous: &str, requests: Requests, token: CancellationToken, ran: &mut bool) -> Result<(Arc<Connection>, Arc<Chat>, StaticSecret, PublicKey, u64, i32)> {
@@ -76,7 +76,6 @@ async fn startstuffold(choice: &str, config: &Config, requests: Requests, token:
     conn.bind_rendezvous().await?;
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
-    chat.send_join(&conn).await?;
     admin_rcv(&conn, filled_slot(&chat), requests, token);
     *ran = false;
     Ok((conn, chat))
@@ -150,7 +149,6 @@ async fn joinstuffold(choice: &str, config: &Config, token: CancellationToken, r
     let conn = Arc::new(conn);
     let chat = Arc::new(chat);
     member_rcv(&conn, filled_slot(&chat), token);
-    chat.send_join(&conn).await?;
     conn.snd_requests(user_name).await?;
     conn.send_db_req(&chat).await?; // send our db (join msg + presence) AND request theirs back
     *ran = false;
@@ -162,7 +160,10 @@ lazy_static::lazy_static! { static ref RE_NUM: Regex = Regex::new(r"\d+").unwrap
 lazy_static::lazy_static! {
     static ref RE_CHR: Regex = Regex::new(r"[a-zA-Z]+").unwrap();
 }
+
+
 pub async fn app() -> Result<()> {
+    // TODO: elegant error handling (Primarily in home.rs)
     // Config file (TODO: change to `~/.fallgejirc` for linux in prod)
     // share dir (TODO: change to `~/.local/share/fallgeji` for linux in prod)
     static CONFIG: &str = "fallegji.toml";
@@ -197,7 +198,7 @@ pub async fn app() -> Result<()> {
     let mut chat: Option<Arc<Chat>> = None;
     // A joiner waits in InitClient until the admin's accept fills this slot with the chat.
     let mut chat_slot: Option<ChatSlot> = None;
-    let mut join_keys: Option<(StaticSecret, PublicKey, u64)> = None;
+    let mut join_keys: Option<(StaticSecret, u64)> = None;
     let mut run_once: bool = true;
     let mut token = CancellationToken::new();
 
@@ -208,15 +209,17 @@ pub async fn app() -> Result<()> {
     // let token = CancellationToken::new();
     let requests = Arc::new(Mutex::new(Vec::<([SocketAddr; 3], String, PublicKey, u32)>::new()));
 
-    // regular input box state
+    // chat UI state
     let mut vim_mode = Vim::Normal;
     let mut seq = String::new();
     let mut input = String::new();
     let mut cursor_pos: usize = 0; // cursor position
     let mut persis_y: usize = 0;   // peristant y position
     let mut anim_tick: usize = 0; // client animation tick
-    let mut client_resend_at = std::time::Instant::now(); // join-request resend cooldown
+    let mut client_resend_at = std::time::Instant::now(); // join-request resend CD
     let mut client_resend_n: usize = 0;
+    let mut scroll_offset: Option<u16> = None;
+    let mut my_addrs: Option<[SocketAddr; 3]> = None; // initMember addrs display
 
     let mut curr_screen = Screen::Home;
 
@@ -233,30 +236,34 @@ pub async fn app() -> Result<()> {
             chat = None;
             chat_slot = None;
             join_keys = None;
+            scroll_offset = None; // re-arm: the next chat entry jumps to the latest message
+            my_addrs = None; // drop: re-resolved on the next join
             home!(terminal, curr_screen, config, choice, chats, conn, chat, chat_slot, join_keys, home_active_section, home_active_field, chat_name_input, user_name_input, rendezvous_input, chat_2_delete, anim_tick, run_once, requests, token);
         } else if curr_screen == Screen::InitServer && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
-            initServer!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input, conn, chat);
+            initAdmin!(terminal, curr_screen, config, choice, chats, admin_active_section, admin_active_row, admin_active_col, requests, input, conn, chat);
         } else if curr_screen == Screen::InitClient && let Some(ref conn) = conn {
-            // Accepted → enter the chat. Clone, don't take: listen reads it from this slot
-            // every packet, so emptying it would silence all reception.
             let accepted = chat_slot.as_ref().and_then(|s| {
-                s.lock().unwrap().as_ref().map(|a| (a.chat.clone(), a.name.clone(), a.peer_id))
+                s.lock().unwrap().as_ref().map(|a| (a.chat.clone(), a.name.clone()))
             });
-            if let Some((acc_chat, acc_name, acc_peer_id)) = accepted {
+            if let Some((acc_chat, acc_name)) = accepted {
                 choice = acc_name.clone();
-                if let Some((prvkey, pubkey, user_id)) = join_keys.take() {
-                    config = Config::save(CONFIG, &acc_name, &user_name_input, &rendezvous_input, user_id, acc_peer_id, pubkey, prvkey)?;
+                if let Some((prvkey, user_id)) = join_keys.take() {
+                    config = Config::save(CONFIG, &acc_name, &user_name_input, &rendezvous_input, user_id, prvkey)?;
                 }
                 chats = ChatChoice::load(CONFIG)?;
                 chat = Some(acc_chat);
                 curr_screen = Screen::Chat;
+                my_addrs = None; // leaving the waitroom
                 continue;
             }
-            initClient!(terminal, curr_screen, config, rendezvous_input, anim_tick, conn, client_resend_at, client_resend_n);
+            if my_addrs.is_none() {
+                my_addrs = Some(conn.current_addrs().await);
+            }
+            initMember!(terminal, curr_screen, config, rendezvous_input, anim_tick, conn, client_resend_at, client_resend_n, my_addrs);
         } else if curr_screen == Screen::Chat && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
-            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y);
+            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y, scroll_offset);
         }
         else {
             curr_screen = Screen::Home;

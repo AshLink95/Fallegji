@@ -247,7 +247,26 @@ async fn test_delete() -> Result<()> {
     // Delete non-existent user returns false
     let result = db.delete_user(99999).await?;
     assert!(!result);
-    
+
+    Ok(())
+}
+
+/// A kicked user still has a referencing peer + messages; delete_user must still remove the
+/// user row (FK on by default would block it), while keeping the messages ([REDACTED]).
+#[tokio::test]
+async fn test_delete_user_with_refs() -> Result<()> {
+    let path = "test_delete_user_with_refs.db";
+    let _ = std::fs::remove_file(path);
+    let db = Database::new(path)?;
+    let (peer, _) = db.create_peer(8081).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let user = db.create_user(pubkey_hex, "victim".to_string(), Uid::getuid()).await?;
+    db.update_peer_link_user(peer.get_id(), user.get_id()).await?;
+    db.create_message(user.get_id(), "hi".to_string(), None).await?; // user has a message (FK ref)
+    assert!(db.delete_user(user.get_id()).await?, "delete reported a change");
+    assert!(db.read_user(user.get_id()).await?.is_none(), "user row gone despite peer + message refs");
+    assert!(db.load_all_messages().await?.iter().any(|m| m.get_contents() == "hi"), "message kept");
+    let _ = std::fs::remove_file(path);
     Ok(())
 }
 

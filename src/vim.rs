@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident, $scroll_offset: ident, $max_offset: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -101,12 +101,29 @@ macro_rules! input_handling {
                             for _ in 0..n.min(10) {
                                 if !$input.is_empty() {
                                     let sender_id = $chat.current_user.get_id();
-                                    let _ = $chat.send_message($conn, sender_id, $input.clone()).await;
+                                    $chat.send_message($conn, sender_id, $input.clone()).await;
+                                    if $scroll_offset == $max_offset && $max_offset != 0 {
+                                        $scroll_offset = $scroll_offset.saturating_add(if n!=0 {n as u16} else {1});
+                                    }
                                 }
                             }
                             $seq.clear();
                             $input.clear();
                             $cursor_pos = 0;
+                        },
+
+                        //Scrolling
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                            $scroll_offset = $max_offset;
+                        },
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                            $scroll_offset = $scroll_offset.saturating_add(1).min($max_offset);
+                        },
+                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                            $scroll_offset = 0;
+                        },
+                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                            $scroll_offset = $scroll_offset.saturating_sub(1);
                         },
 
                         // NORMAL mode handling
@@ -779,6 +796,8 @@ macro_rules! input_handling {
                         KeyCode::Char(c) if $vim_mode == Vim::Insert => {
                             $input.insert($cursor_pos, c);
                             $cursor_pos += 1;
+                            let tc = std::sync::Arc::clone($conn);
+                            tokio::spawn(async move { let _ = tc.send_typing().await; });
                         },
                         _ => {}
                     }

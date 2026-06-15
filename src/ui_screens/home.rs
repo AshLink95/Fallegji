@@ -390,7 +390,6 @@ macro_rules! home {
                             if let Some(chosen) = $chats.available.get($chats.choice) {
                                 $config = Config::load(CONFIG, Some(chosen))?;
                                 $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
-                                // Resume as host (admin) or as member, per our saved role.
                                 let user_name = $config.user_name.clone().unwrap_or_default();
                                 let users = Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
                                 let is_admin = users.iter().any(|u| u.get_name() == user_name && u.get_role() == Some(Role::Admin));
@@ -411,14 +410,12 @@ macro_rules! home {
                                 1 if user_name_valid => $active_field = 2,
                                 2 if rendezvous_valid && chat_name_valid && user_name_valid => {
                                     $choice = $chat_name_input.clone();
-                                    let ccppup = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
-                                    $conn = Some(ccppup.0);
-                                    $chat = Some(ccppup.1);
-                                    let prvkey = ccppup.2;
-                                    let pubkey = ccppup.3;
-                                    let user_id = ccppup.4;
-                                    let peer_id = ccppup.5;
-                                    $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, peer_id, pubkey, prvkey)?;
+                                    let ccpu = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
+                                    $conn = Some(ccpu.0);
+                                    $chat = Some(ccpu.1);
+                                    let prvkey = ccpu.2;
+                                    let user_id = ccpu.4;
+                                    $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, prvkey)?;
                                     $curr_screen = Screen::InitServer;
                                 }
                                 _ => {}
@@ -428,12 +425,11 @@ macro_rules! home {
                             match $active_field {
                                 0 if user_name_valid => $active_field = 1,
                                 1 if rendezvous_valid && user_name_valid => {
-                                    // Joiner brings up only its connection; the chat is created and
-                                    // config saved once the admin accepts (see the InitClient handler).
                                     let jc = joinstuffnew(&$user_name_input, &$rendezvous_input, $token.clone(), &mut $run_once).await?;
                                     $conn = Some(jc.0);
                                     $chat_slot = Some(jc.1);
-                                    $join_keys = Some((jc.2, jc.3, jc.4));
+                                    $join_keys = Some((jc.2, jc.4));
+                                    $config.user_name = Some($user_name_input.clone());
                                     $curr_screen = Screen::InitClient;
                                 }
                                 _ => {}
