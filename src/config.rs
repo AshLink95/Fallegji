@@ -1,4 +1,3 @@
-// partially prompt engineered
 use ratatui::{widgets::BorderType, style::Color};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::{Path, PathBuf}};
@@ -70,7 +69,7 @@ pub struct ChatConfig {
     pub online_color: Option<(u8, u8, u8)>,
 }
 
-pub struct ChatChoice { //TODO: need to include the username in that chat
+pub struct ChatChoice {
     pub available: Vec<String>,
     pub choice: usize
 }

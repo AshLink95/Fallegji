@@ -604,10 +604,13 @@ impl Database {
                 }
             }
 
-            // Delete users not in new set
+            // Delete users not in new set. FK is on; a dropped user may still have messages
+            // (kept, rendered [REDACTED]), so disable FK for these deletes to orphan them.
+            conn.execute("PRAGMA foreign_keys = OFF", [])?;
             for old_id in existing_ids.difference(&new_ids) {
                 conn.execute("DELETE FROM users WHERE id = ?1", params![old_id])?;
             }
+            conn.execute("PRAGMA foreign_keys = ON", [])?;
 
             // Insert new users
             for user in &users {
@@ -686,6 +689,9 @@ impl Database {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
+            // Messages may have orphan senders (a kicked user, kept + rendered [REDACTED]); FK is
+            // on, so disable it here or those inserts fail and abort the whole rebuild mid-way.
+            conn.execute("PRAGMA foreign_keys = OFF", [])?;
 
             // Get existing message IDs
             let mut stmt = conn.prepare("SELECT id FROM messages")?;
@@ -736,6 +742,8 @@ impl Database {
                     )?;
                 }
             }
+
+            conn.execute("PRAGMA foreign_keys = ON", [])?;
 
             // Count total messages in DB
             let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM messages")?;

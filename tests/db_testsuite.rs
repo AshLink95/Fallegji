@@ -1,4 +1,3 @@
-// prompt engineered
 use fallegji::db::Database;
 use fallegji::auth::{Authentication, Role, User, Uid};
 use fallegji::messaging::Message;

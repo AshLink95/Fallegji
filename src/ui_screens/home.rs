@@ -1,4 +1,3 @@
-// partially prompt engineered
 /// Home Screen
 ///
 /// import the following in the file using the macro:

@@ -1,4 +1,3 @@
-// prompt engineered
 use fallegji::auth::{User, Role, Authentication, Uid};
 use anyhow::Result;
 

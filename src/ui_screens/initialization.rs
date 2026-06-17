@@ -1,4 +1,3 @@
-//TODO: have the rendezvous address displayed in initAdmin
 #[macro_export]
 macro_rules! initAdmin {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $active_section: ident, $active_row: ident, $active_col: ident, $requests: ident, $input:ident, $conn: ident, $chat: ident) => {

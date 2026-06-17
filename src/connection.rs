@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::{UdpSocket, SocketAddr, IpAddr, Ipv4Addr}, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH, Duration}};
+use std::{collections::{HashMap, LinkedList}, net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use sha2::Sha256;
@@ -30,87 +30,6 @@ pub struct Peer {
     last_seen_typing: Option<i64>
 }
 
-/// This machine's three candidate addresses for `port`: loopback, LAN (UDP trick),
-/// and public (defaults to LAN until STUN refines it — see `public_addr`).
-pub fn local_addrs(port: u16) -> Result<[SocketAddr; 3]> {
-    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-    let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-    let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let lan = SocketAddr::new(lan_ip, port);
-    Ok([localhost, lan, lan])
-}
-
-/// Discover our public (post-NAT) IP via the OpenDNS trick: `resolver1.opendns.com` answers
-/// the special name `myip.opendns.com` with the querier's own public IP. One UDP round-trip
-/// (~tens of ms), the method `dig`/neofetch use. Query bytes: DNS header (RD set, 1 question)
-/// + QNAME `myip.opendns.com` + A/IN; reply's A rdata (last 4 bytes) is the IP.
-pub async fn public_ip() -> Result<IpAddr> {
-    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-    sock.connect("208.67.222.222:53").await?;
-    let q: &[u8] = &[
-        0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
-        4, b'm', b'y', b'i', b'p', 7, b'o', b'p', b'e', b'n', b'd', b'n', b's', 3, b'c', b'o', b'm', 0,
-        0, 1, 0, 1,
-    ];
-    tokio::time::timeout(Duration::from_secs(2), sock.send(q)).await??;
-    let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(Duration::from_secs(2), sock.recv(&mut buf)).await??;
-    if n < 4 { return Err(anyhow::anyhow!("short DNS reply")); }
-    Ok(IpAddr::V4(Ipv4Addr::new(buf[n - 4], buf[n - 3], buf[n - 2], buf[n - 1])))
-}
-
-/// Race all candidate addresses concurrently, returning the first that connects.
-/// (Serial-per-addr cost 1s × N on stale addrs; racing caps it at ~1s.)
-pub async fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
-    let mut set = tokio::task::JoinSet::new();
-    for &addr in addrs {
-        set.spawn(async move {
-            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await.ok()?.ok()
-        });
-    }
-    while let Some(res) = set.join_next().await {
-        if let Ok(Some(stream)) = res {
-            return Some(stream);
-        }
-    }
-    None
-}
-
-/// Bind a TCP listener with SO_REUSEADDR so a recently-used port (still in TIME_WAIT)
-/// rebinds without an "address already in use" error.
-pub fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = if addr.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(1024)
-}
-
-pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
-    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-
-    let mut port = 1952;
-    let max = 74;
-
-    for _ in 0..max {
-        let addr = SocketAddr::new(ip, port);
-
-        match bind_listener(addr) {
-            Ok(sock) => return Ok((addr, sock)),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                port += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Err(anyhow::anyhow!("Too many ports in use"))
-}
-
-
 /// key generation
 pub trait KeyGen {
     fn keypairgen() -> Result<(PublicKey, StaticSecret)>;
@@ -119,6 +38,7 @@ pub trait KeyGen {
 
 /// user_id -> peer, key, socket
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
+
 /// Pending join requests awaiting admin accept/reject: (addrs, name, pubkey, uid).
 pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>>;
 
@@ -127,11 +47,21 @@ pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>>;
 pub struct Accepted { pub chat: Arc<Chat>, pub name: String }
 pub type ChatSlot = Arc<Mutex<Option<Accepted>>>;
 
+struct DbSyncBuf {
+    msgs: LinkedList<Vec<u8>>,
+    usrs: LinkedList<Vec<u8>>,
+    pirs: LinkedList<Vec<u8>>,
+    admin_rank: Option<u8>,
+    rcv_count: u8, // syncs buffered this round; decide once it reaches the online-peer count
+    first_at: Option<Instant>, // when this round's first sync landed; decide after the cooldown
+}
+
 pub struct Connection {
     prvkey: StaticSecret,
     socket: Mutex<(SocketAddr, Arc<TcpListener>)>,
     peers: Arc<Mutex<Peermap>>,
     rendezvous: (SocketAddr, Mutex<Option<Arc<TcpListener>>>),
+    db_sync_buf: Mutex<DbSyncBuf>, // interior mutability: read_db_sync buffers via &self
     user: Option<(u64, String, Uid)>,
 }
 
@@ -146,22 +76,15 @@ pub trait Secrecy {
 /// `fallback_lookup/send` re-establish routing when the rendezvous holder drops.
 #[allow(async_fn_in_trait)]
 pub trait RendezVous {
-    /// Admin-side handshake responder. Binds the rendezvous addr and loops accepting
-    /// join requests. For each: parse `name`, `addr`, `pubkey` from the request, push it
-    /// onto `requests` (the accept/reject queue), and reply with the admin's own pubkey so
-    /// the newcomer can immediately derive a shared key and treat the admin as its sole peer
-    /// while it waits to be accepted or refused. Cancelable via `token`.
+    /// Admin-side handshake responder
     async fn rcv_requests(&self, requests: Requests, token: CancellationToken) -> Result<()>;
-    /// Newcomer-side handshake initiator. Connects to the rendezvous addr and sends its
-    /// `name` + addr + pubkey. Receives the admin's pubkey in response, derives the shared
-    /// key, and registers the admin as its only peer — then waits for the admin's accept/refuse.
-    /// Returns true once the admin acknowledges the request.
+    /// Newcomer-side handshake initiator
     async fn snd_requests(&self, name: String) -> Result<bool>;
 
     /// Try to become the new rendezvous holder. If address is taken, connect instead.
     /// Returns true if we bound (became holder), false if we connected.
     async fn fallback_lookup(&self) -> Result<bool>;
-    /// Re-announce presence to rendezvous holder so they can accept_peer and update our info.
+    /// Re-announce presence to rendezvous holder so they can accept_peer
     async fn fallback_send(&self, name: String) -> Result<bool>;
 }
 
@@ -184,10 +107,11 @@ pub trait Communication {
     async fn read_typing(&self, peer_id: u64) -> Result<()>;
 
     async fn send_db_sync(&self, db: &Database) -> Result<()>;
-    async fn read_db_sync(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
+    async fn read_db_sync(&self, chat: &Chat, peer_id: u64, payload: Vec<u8>) -> Result<()>;
+    async fn decide_sync(&self, chat: &Chat) -> Result<()>;
 
     async fn send_db_req(&self, chat: &Chat) -> Result<()>;
-    async fn read_db_req(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
+    async fn read_db_req(&self, chat: &Chat, peer_id: u64, payload: Vec<u8>) -> Result<()>;
     /// Broadcast a kick (the kicked user_id) so every peer drops that user/peer in real time.
     async fn send_kick(&self, user_id: u64) -> Result<()>;
     async fn read_kick(&self, chat: &Chat, user_id: u64) -> Result<()>;
@@ -308,6 +232,9 @@ impl Connection {
             socket: Mutex::new((socket.0, Arc::new(socket.1))),
             peers: Arc::new(Mutex::new(peermap)),
             rendezvous: (rendezvous_addr, Mutex::new(None)),
+            db_sync_buf: Mutex::new(DbSyncBuf {
+                msgs: LinkedList::new(), usrs: LinkedList::new(), pirs: LinkedList::new(), admin_rank: None, rcv_count: 0, first_at: None,
+            }),
             user: None,
         }
     }
@@ -421,7 +348,8 @@ impl Connection {
         self.rebuild_peermap(&chat.db).await?;
         self.connect_peers().await;
         chat.send_join(self).await;
-        self.send_db_req(&chat).await?;
+        self.send_db_req(&chat).await?;   // request their db (admin replies with a sync to us)
+        self.send_db_sync(&chat.db).await?; // then push our own so they learn us
         Ok(())
     }
 
@@ -704,10 +632,21 @@ impl RendezVous for Connection {
 
 impl Communication for Connection {
     async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()> {
+        let mut cooldown = tokio::time::interval(Duration::from_millis(500));
         loop {
             let listener = self.socket.lock().unwrap().1.clone();
             let (mut stream, _) = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
+                _ = cooldown.tick() => {
+                    // Buffered syncs waited out the 3s cooldown → collapse them (fallback for the
+                    // read_db_sync fast path when an online peer stays silent). Needs the chat.
+                    let chat = slot.lock().unwrap().as_ref().map(|a| a.chat.clone());
+                    if let Some(chat) = chat {
+                        let due = self.db_sync_buf.lock().unwrap().first_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(3));
+                        if due { let _ = self.decide_sync(&chat).await; }
+                    }
+                    continue;
+                }
                 res = listener.accept() => res?,
             };
             let me = Arc::clone(&self);
@@ -752,8 +691,8 @@ impl Communication for Connection {
                         (MSG_HD, Some(chat)) => me.read_msg(&chat, payload).await,
                         (HBT_HD, Some(chat)) => me.read_heartbeat(&chat, peer_id).await,
                         (TYP_HD, Some(_)) => me.read_typing(peer_id).await,
-                        (DBS_HD, Some(chat)) => me.read_db_sync(&chat, payload).await,
-                        (DBR_HD, Some(chat)) => me.read_db_req(&chat, payload).await,
+                        (DBS_HD, Some(chat)) => me.read_db_sync(&chat, peer_id, payload).await,
+                        (DBR_HD, Some(chat)) => me.read_db_req(&chat, peer_id, payload).await,
                         (KCK_HD, Some(chat)) => match serde_json::from_slice::<u64>(&payload) {
                             Ok(uid) => me.read_kick(&chat, uid).await,
                             Err(e) => Err(e.into()),
@@ -900,7 +839,30 @@ impl Communication for Connection {
     }
 
     async fn send_db_sync(&self, db: &Database) -> Result<()> {
-        let bytes = db.dump().await?;
+        // Send three separately-zipped components — messages, users, peers, in that order —
+        // length-framed as [u32 len][zip]×3. Each is serialized from canonical (sorted) rows
+        // stripped of volatile/local fields (autoincrement id, heartbeat) so identical logical
+        // state produces identical bytes — the buffer/decider votes on these.
+        let mut msgs: Vec<(u64, i64, String)> = db.load_all_messages().await?
+            .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+        msgs.sort_by_key(|a| (a.1, a.0));
+        let mut usrs: Vec<(u64, String, Option<String>, u32)> = db.load_all_users().await?
+            .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
+        usrs.sort_by_key(|u| u.0);
+        let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = db.load_all_peers().await?
+            .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
+        pirs.sort_by_key(|a| a.0);
+
+        let mut bytes = Vec::new();
+        for blob in [
+            compress_prepend_size(&serde_json::to_vec(&msgs)?),
+            compress_prepend_size(&serde_json::to_vec(&usrs)?),
+            compress_prepend_size(&serde_json::to_vec(&pirs)?),
+        ] {
+            bytes.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&blob);
+        }
+
         let targets: Vec<(Key, Arc<TokioMutex<TcpStream>>)> = {
             let me = self.user.as_ref().map(|(id, _, _)| *id);
             let guard = self.peers.lock().unwrap();
@@ -919,54 +881,145 @@ impl Communication for Connection {
         }
         Ok(())
     }
-    async fn read_db_sync(&self, chat: &Chat, payload: Vec<u8>) -> Result<()> {
-        let bytes: Vec<u8> = serde_json::from_slice(&payload)?;
-        let incoming = Database::new(":memory:")?;
-        incoming.load(bytes).await?;
-        let in_users = incoming.load_all_users().await?;
-        let in_peers = incoming.load_all_peers().await?;
-        let in_msgs  = incoming.load_all_messages().await?;
-        let my_users = chat.db.load_all_users().await?;
-        let my_peers = chat.db.load_all_peers().await?;
-        let my_msgs  = chat.db.load_all_messages().await?;
-        let my_user_ids: std::collections::HashSet<u64> = my_users.iter().map(|u| u.get_id()).collect();
-        let learned_users = in_users.iter().any(|u| !my_user_ids.contains(&u.get_id()));
-        let my_msgs_len = my_msgs.len();
-        let mut users: HashMap<u64, User> = HashMap::new();
-        for u in my_users.into_iter().chain(in_users) {
-            users.entry(u.get_id()).or_insert(u);
+    /// Classifier: split the length-framed [u32 len][zip]×3 (messages, users, peers) and stash
+    /// each zip into `db_sync_buf`, tagging the admin's entry via `admin_rank`. The bg decider
+    /// collapses the buffer later (admin-authoritative roster, union messages).
+    async fn read_db_sync(&self, chat: &Chat, peer_id: u64, payload: Vec<u8>) -> Result<()> {
+        let framed: Vec<u8> = serde_json::from_slice(&payload)?;
+        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(3);
+        let mut i = 0usize;
+        for _ in 0..3 {
+            if i + 4 > framed.len() { return Err(anyhow::anyhow!("db sync: truncated frame")); }
+            let len = u32::from_be_bytes(framed[i..i + 4].try_into().unwrap()) as usize;
+            i += 4;
+            if i + len > framed.len() { return Err(anyhow::anyhow!("db sync: short component")); }
+            blobs.push(framed[i..i + len].to_vec());
+            i += len;
         }
-        users.entry(0u64).or_insert_with(User::sys);
-        let merged_users: Vec<User> = users.into_values().collect();
-        let mut peers: HashMap<u64, Peer> = HashMap::new();
-        for p in my_peers.into_iter().chain(in_peers) {
-            if let Some(uid) = p.get_user_id() { peers.entry(uid).or_insert(p); }
-        }
-        let merged_peers: Vec<Peer> = peers.into_values().collect();
+        let online = {
+            let me = self.user.as_ref().map(|(id, _, _)| *id);
+            self.peers.lock().unwrap().iter()
+                .filter(|(uid, (p, _, _))| Some(**uid) != me && p.is_online()).count()
+        };
+        let trigger = {
+            let mut it = blobs.into_iter();
+            let mut buf = self.db_sync_buf.lock().unwrap();
+            let idx = buf.msgs.len() as u8; // this sender's slot across the three parallel lists
+            buf.msgs.push_back(it.next().unwrap());
+            buf.usrs.push_back(it.next().unwrap());
+            buf.pirs.push_back(it.next().unwrap());
+            if buf.rcv_count == 0 { buf.first_at = Some(Instant::now()); } // start the cooldown
+            buf.rcv_count += 1;
+            if Some(peer_id) == chat.get_admin() { buf.admin_rank = Some(idx); }
+            // Fast path: heard from every known-online peer. (online == 0 waits for the cooldown
+            // instead, so a node with no heartbeats yet doesn't decide on a single early sync.)
+            online > 0 && buf.rcv_count as usize >= online
+        };
+        if trigger { self.decide_sync(chat).await?; }
+        Ok(())
+    }
+
+    /// Collapse the buffered syncs into the db. Roster (users+peers): the admin's copy if we
+    /// got one, else the most common version (our own included). Messages: always the union of
+    /// everyone's (new ones never dropped), deduped by identity. Persisted via save_all_*.
+    async fn decide_sync(&self, chat: &Chat) -> Result<()> {
+        let (msg_blobs, usr_blobs, pir_blobs, admin_rank) = {
+            let mut buf = self.db_sync_buf.lock().unwrap();
+            buf.rcv_count = 0;
+            buf.first_at = None;
+            (
+                std::mem::take(&mut buf.msgs).into_iter().collect::<Vec<_>>(),
+                std::mem::take(&mut buf.usrs).into_iter().collect::<Vec<_>>(),
+                std::mem::take(&mut buf.pirs).into_iter().collect::<Vec<_>>(),
+                buf.admin_rank.take(),
+            )
+        };
+        if usr_blobs.is_empty() { return Ok(()); }
+
+        // Our own current state (serialized exactly like send_db_sync) is a vote too.
+        let mut my_u: Vec<(u64, String, Option<String>, u32)> = chat.db.load_all_users().await?
+            .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
+        my_u.sort_by_key(|u| u.0);
+        let my_usrs = compress_prepend_size(&serde_json::to_vec(&my_u)?);
+        let mut my_p: Vec<(Option<u64>, [String; 3], [u8; 32])> = chat.db.load_all_peers().await?
+            .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
+        my_p.sort_by_key(|a| a.0);
+        let my_pirs = compress_prepend_size(&serde_json::to_vec(&my_p)?);
+
+        // Roster winner: the admin's copy (a received one, or ours if we *are* the admin),
+        // else the most frequent version with ours counted in.
+        let i_am_admin = chat.get_admin() == self.user.as_ref().map(|(id, _, _)| *id);
+        let winner = |blobs: &[Vec<u8>], mine: &Vec<u8>| -> Vec<u8> {
+            if let Some(i) = admin_rank && (i as usize) < blobs.len() {
+                return blobs[i as usize].clone();
+            }
+            if i_am_admin { return mine.clone(); }
+            let mut pool = blobs.to_vec();
+            pool.push(mine.clone());
+            pool.iter().max_by_key(|b| pool.iter().filter(|x| x == b).count()).cloned().unwrap()
+        };
+        let chosen_usrs = winner(&usr_blobs, &my_usrs);
+        let chosen_pirs = winner(&pir_blobs, &my_pirs);
+        let urows: Vec<(u64, String, Option<String>, u32)> =
+            serde_json::from_slice(&decompress_size_prepended(&chosen_usrs).map_err(|e| anyhow::anyhow!("{e}"))?)?;
+        let prows: Vec<(Option<u64>, [String; 3], [u8; 32])> =
+            serde_json::from_slice(&decompress_size_prepended(&chosen_pirs).map_err(|e| anyhow::anyhow!("{e}"))?)?;
+
+        // Messages: union all buffered + ours, deduped by identity.
+        let mut my_m: Vec<(u64, i64, String)> = chat.db.load_all_messages().await?
+            .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+        my_m.sort_by_key(|a| (a.1, a.0));
+        let my_msgs = compress_prepend_size(&serde_json::to_vec(&my_m)?);
         let mut seen = std::collections::HashSet::new();
-        let mut merged_msgs = Vec::new();
-        for m in my_msgs.into_iter().chain(in_msgs) {
-            if seen.insert((m.get_sender_id(), m.get_sent_at(), m.get_contents())) {
-                let mut nm = Message::new(-1, m.get_sender_id(), m.get_contents());
-                nm.set_date(m.get_sent_at());
-                merged_msgs.push(nm);
+        let mut messages = Vec::new();
+        for blob in msg_blobs.iter().chain(std::iter::once(&my_msgs)) {
+            let rows: Vec<(u64, i64, String)> = serde_json::from_slice(&decompress_size_prepended(blob).map_err(|e| anyhow::anyhow!("{e}"))?)?;
+            for (sid, ts, c) in rows {
+                if seen.insert((sid, ts, c.clone())) {
+                    let mut m = Message::new(-1, sid, c);
+                    m.set_date(ts);
+                    messages.push(m);
+                }
             }
         }
-        let merged_len = merged_msgs.len();
-        chat.db.save_all_users(merged_users).await?;
-        chat.db.save_all_peers(merged_peers).await?;
-        chat.db.save_all_messages(merged_msgs).await?;
+
+        // Rebuild via existing constructors: peers carry the pubkey, users re-derive their id
+        // from it (User::new), so the synced ids match. Persist with save_all_*.
+        let mut keys: HashMap<u64, [u8; 32]> = HashMap::new();
+        let mut peers = Vec::new();
+        for (user_id, addrs, pk) in prows {
+            if let (Some(uid), Some(a)) = (user_id, Peer::parse_addrs(&addrs.join(","))) {
+                keys.insert(uid, pk);
+                peers.push(Peer { id: -1, user_id, addrs: a, pubkey: PublicKey::from(pk), last_heartbeat: None, last_seen_typing: None });
+            }
+        }
+        let mut users = Vec::new();
+        for (id, name, role, uid) in urows {
+            let Some(pk) = keys.get(&id) else { continue }; // a user with no peer in the chosen set
+            let mut u = User::new(hex::encode(pk), name, Uid::from(uid));
+            if let Some(r) = role.and_then(|r| r.parse().ok()) { u.set_role(r); }
+            users.push(u);
+        }
+        users.push(User::sys()); // keep sys (id 0); load omits it but system messages reference it
+        let gained_msgs = messages.len() > my_m.len();
+        chat.db.save_all_users(users).await?;
+        chat.db.save_all_peers(peers).await?;
+        chat.db.save_all_messages(messages).await?;
+
+        // Refresh the in-memory views from the db.
         *chat.message_history.write().unwrap() = chat.db.load_all_messages().await?;
         let users_now = chat.db.load_all_users().await?;
         {
             let mut members = chat.members.write().unwrap();
             members.clear();
-            members.insert(0u64, User::sys());
+            members.insert(0, User::sys());
             for u in users_now { members.insert(u.get_id(), u); }
         }
         self.rebuild_peermap(&chat.db).await?;
         self.connect_peers().await;
-        if learned_users || merged_len > my_msgs_len {
+        // Gossip the decided state onward, but only if it changed ours — so convergence
+        // terminates (once everyone agrees, nobody re-broadcasts). Messages stay additive.
+        if chosen_usrs != my_usrs || chosen_pirs != my_pirs || gained_msgs {
             let _ = self.send_db_sync(&chat.db).await;
         }
         Ok(())
@@ -986,8 +1039,8 @@ impl Communication for Connection {
         };
 
         if let Some((key, stream_arc)) = target {
-            let bytes = chat.db.dump().await?;
-            let frame = Connection::encode(&key, DBR_HD, bytes)?;
+            // Just a request header — the reply (read_db_req) carries the sync, not us.
+            let frame = Connection::encode(&key, DBR_HD, Vec::<u8>::new())?;
             tokio::spawn(async move {
                 let mut s = stream_arc.lock().await;
                 let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
@@ -996,9 +1049,35 @@ impl Communication for Connection {
         }
         Ok(())
     }
-    async fn read_db_req(&self, chat: &Chat, payload: Vec<u8>) -> Result<()> {
-        self.send_db_sync(&chat.db).await?;
-        self.read_db_sync(chat, payload).await
+    async fn read_db_req(&self, chat: &Chat, peer_id: u64, _payload: Vec<u8>) -> Result<()> {
+        // Reply with our sync (3 zipped components, length-framed) to the requester only.
+        let mut msgs: Vec<(u64, i64, String)> = chat.db.load_all_messages().await?
+            .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+        msgs.sort_by_key(|a| (a.1, a.0));
+        let mut usrs: Vec<(u64, String, Option<String>, u32)> = chat.db.load_all_users().await?
+            .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
+        usrs.sort_by_key(|u| u.0);
+        let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = chat.db.load_all_peers().await?
+            .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
+        pirs.sort_by_key(|a| a.0);
+        let mut bytes = Vec::new();
+        for blob in [
+            compress_prepend_size(&serde_json::to_vec(&msgs)?),
+            compress_prepend_size(&serde_json::to_vec(&usrs)?),
+            compress_prepend_size(&serde_json::to_vec(&pirs)?),
+        ] {
+            bytes.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&blob);
+        }
+        let target = self.peers.lock().unwrap().get(&peer_id)
+            .and_then(|(_, k, s)| s.as_ref().map(|arc| (*k, Arc::clone(arc))));
+        if let Some((key, stream_arc)) = target {
+            let frame = Connection::encode(&key, DBS_HD, bytes)?;
+            let mut s = stream_arc.lock().await;
+            s.write_all(&(frame.len() as u32).to_be_bytes()).await?;
+            s.write_all(&frame).await?;
+        }
+        Ok(())
     }
 
     async fn send_kick(&self, user_id: u64) -> Result<()> {
@@ -1031,4 +1110,82 @@ impl Communication for Connection {
         self.rebuild_peermap(&chat.db).await?;
         Ok(())
     }
+}
+
+//TODO: put these functions in some connection impl
+
+/// This machine's three candidate addresses for `port`: loopback, LAN (UDP trick),
+/// and public (defaults to LAN until STUN refines it — see `public_addr`).
+pub fn local_addrs(port: u16) -> Result<[SocketAddr; 3]> {
+    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+    let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+    let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let lan = SocketAddr::new(lan_ip, port);
+    Ok([localhost, lan, lan])
+}
+
+/// Discover our public (post-NAT) IP via the OpenDNS trick
+pub async fn public_ip() -> Result<IpAddr> {
+    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    sock.connect("208.67.222.222:53").await?;
+    let q: &[u8] = &[
+        0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+        4, b'm', b'y', b'i', b'p', 7, b'o', b'p', b'e', b'n', b'd', b'n', b's', 3, b'c', b'o', b'm', 0,
+        0, 1, 0, 1,
+    ];
+    tokio::time::timeout(Duration::from_secs(2), sock.send(q)).await??;
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(Duration::from_secs(2), sock.recv(&mut buf)).await??;
+    if n < 4 { return Err(anyhow::anyhow!("short DNS reply")); }
+    Ok(IpAddr::V4(Ipv4Addr::new(buf[n - 4], buf[n - 3], buf[n - 2], buf[n - 1])))
+}
+
+/// Race all candidate addresses concurrently, returning the first that connects.
+pub async fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
+    let mut set = tokio::task::JoinSet::new();
+    for &addr in addrs {
+        set.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(addr)).await.ok()?.ok()
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(stream)) = res {
+            return Some(stream);
+        }
+    }
+    None
+}
+
+/// Bind a TCP listener with SO_REUSEADDR so a recently-used port (still in TIME_WAIT)
+/// rebinds without an "address already in use" error.
+pub fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
+    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
+    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
+    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+
+    let mut port = 1952;
+    let max = 74;
+
+    for _ in 0..max {
+        let addr = SocketAddr::new(ip, port);
+
+        match bind_listener(addr) {
+            Ok(sock) => return Ok((addr, sock)),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                port += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!("Too many ports in use"))
 }

@@ -1,4 +1,3 @@
-// prompt engineered
 use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
 use tokio::{net::{TcpListener, TcpStream}, sync::Mutex, io::{AsyncReadExt, AsyncWriteExt}};
 
@@ -464,30 +463,7 @@ async fn test_read_data() -> Result<()> {
     assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "incoming"));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(chat.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "incoming"), "msg persisted");
-
-    // read_db_sync: superset snapshot adopted (db + members).
-    let src = Database::new(":memory:")?;
-    let (sp, _) = src.create_peer(9000).await?;
-    let sp_hex = sp.get_pubkey().to_bytes().encode_hex::<String>();
-    let su = src.create_user(sp_hex, "alice".to_string(), Uid::getuid()).await?;
-    src.update_peer_link_user(sp.get_id(), su.get_id()).await?;
-    let _ = src.create_message(su.get_id(), "synced".to_string(), None).await?;
-    let snapshot = src.dump().await?;
-    let chat_a = test_chat()?;
-    conn.read_db_sync(&chat_a, serde_json::to_vec(&snapshot)?).await?;
-    assert!(chat_a.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "synced"), "snapshot adopted");
-    assert!(chat_a.members.read().unwrap().values().any(|u| u.get_name() == "alice"));
-
-    // read_db_sync: conflicting snapshot (missing local data) rejected.
-    let empty = Database::new(":memory:")?.dump().await?;
-    let chat_b = test_chat()?;
-    let (bp, _) = chat_b.db.create_peer(9001).await?;
-    let bp_hex = bp.get_pubkey().to_bytes().encode_hex::<String>();
-    let bu = chat_b.db.create_user(bp_hex, "bob".to_string(), Uid::getuid()).await?;
-    chat_b.db.update_peer_link_user(bp.get_id(), bu.get_id()).await?;
-    let _ = chat_b.db.create_message(bu.get_id(), "local only".to_string(), None).await?;
-    conn.read_db_sync(&chat_b, serde_json::to_vec(&empty)?).await?;
-    assert!(chat_b.db.load_all_messages().await?.iter().any(|m| m.get_contents() == "local only"), "conflict not clobbered");
+    // (db-sync behavior is covered standalone by messaging_testsuite::test_decide_sync.)
 
     // accept_chat: joiner with no chat yet creates it from the admin's db (named with
     // the real chat name) and registers itself; the slot then holds the chat.
@@ -602,10 +578,8 @@ async fn test_read_db_req_responds_with_sync() -> Result<()> {
     let conn = Connection::new(prvkey, free_rendezvous_addr().await, ephemeral().await?, peermap).await;
 
     let chat = test_chat()?;
-    // The request now carries the requester's db; read_db_req merges it then replies.
-    let src = Database::new(":memory:")?;
-    let payload = serde_json::to_vec(&src.dump().await?)?;
-    conn.read_db_req(&chat, payload).await?;
+    // read_db_req replies with our sync to the requester (peer 5, which holds the stream).
+    conn.read_db_req(&chat, 5, Vec::new()).await?;
 
     let (header, _) = Connection::decode(&key, &read_frame(&mut server).await?)?;
     assert_eq!(header, DBS_HD, "db request answered with a db sync");
@@ -714,7 +688,7 @@ async fn test_message_exchange() -> Result<()> {
     admin_db.create_peer_with(admin_pub, [admin_addr; 3], admin_user.get_id()).await?;
     let admin_chat = Arc::new(Chat {
         message_history: Arc::new(std::sync::RwLock::new(Vec::new())),
-        members: Arc::new(std::sync::RwLock::new(std::iter::once((admin_user.get_id(), admin_user.clone())).collect())),
+        members: Arc::new(std::sync::RwLock::new(std::iter::once((admin_user.get_id(), admin_user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
         current_user: admin_user.clone(),
         db: admin_db.clone(),
     });
@@ -831,7 +805,9 @@ async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
     let pubkey = PublicKey::from(&prv);
     let uid = Uid::from(1);
     let db = Database::new(":memory:")?;
-    let user = db.create_user(pubkey.as_bytes().encode_hex::<String>(), name.to_string(), uid).await?;
+    let mut user = db.create_user(pubkey.as_bytes().encode_hex::<String>(), name.to_string(), uid).await?;
+    user.set_role(Role::Admin); // the decider trusts the admin's roster — it must hold the role
+    db.update_user_role(user.get_id(), Role::Admin).await?;
     db.create_peer_with(pubkey, [addr; 3], user.get_id()).await?;
     let chat = std::sync::Arc::new(Chat {
         message_history: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -883,7 +859,7 @@ async fn test_net_roster_and_dedup() -> Result<()> {
     let alice = net_admin("alice", room).await?;
     let bob = net_join(&alice, "bob", room, 2).await?;
     let carol = net_join(&alice, "carol", room, 3).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(3500)).await; // allow the sync cooldown to collapse
 
     // Bug 1: non-admins must learn each other (the admin relays the roster on accept).
     assert!(knows(&bob, "carol"), "bob learned carol");
@@ -915,5 +891,34 @@ async fn test_net_roster_and_dedup() -> Result<()> {
         }
     }
     for f in ["bob__room.db", "carol__room.db"] { let _ = std::fs::remove_file(f); } // joiners' chat dbs
+    Ok(())
+}
+
+/// Kick propagation: the admin kicks a member; it's dropped live from every connected peer
+/// (the KCK packet), and a member who joins *afterwards* never learns the kicked user (the
+/// admin's db it adopts at accept no longer contains them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_kick_propagation() -> Result<()> {
+    let room = "kickroom";
+    let alice = net_admin("alice", room).await?;
+    let bob = net_join(&alice, "bob", room, 2).await?;
+    let carol = net_join(&alice, "carol", room, 3).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(knows(&carol, "bob"), "precondition: carol knows bob");
+
+    alice.chat.kick(&alice.conn, bob.user_id).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Real-time: bob is gone from the admin and from the still-connected member.
+    assert!(!knows(&alice, "bob"), "admin dropped the kicked user");
+    assert!(!knows(&carol, "bob"), "connected member dropped the kicked user via the kick packet");
+
+    // A later joiner never sees the kicked user (admin's adopted db no longer has them).
+    let dave = net_join(&alice, "dave", room, 4).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!knows(&dave, "bob"), "later joiner never learns the kicked user");
+    assert!(knows(&dave, "carol"), "later joiner still learns the remaining members");
+
+    for f in ["bob__kickroom.db", "carol__kickroom.db", "dave__kickroom.db"] { let _ = std::fs::remove_file(f); }
     Ok(())
 }

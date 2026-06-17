@@ -1,4 +1,3 @@
-// prompt engineered
 use std::{collections::HashMap, net::SocketAddr, sync::{Arc, RwLock}};
 use tokio::net::TcpListener;
 use fallegji::{
@@ -8,6 +7,7 @@ use fallegji::{
     connection::{Connection, Peer, KeyGen, Communication, get_free_port},
 };
 use hex::ToHex;
+use x25519_dalek::PublicKey;
 use anyhow::Result;
 
 /// In-memory Chat with a linked admin user + sys, for the logic-only tests.
@@ -190,7 +190,7 @@ async fn test_chat_join() -> Result<()> {
 // connection_testsuite::test_message_exchange.
 // ----------------------------------------------------------------------------
 
-struct Node { conn: Connection, chat: Chat, user_id: u64, db_path: String }
+struct Node { conn: Connection, chat: Chat, user_id: u64, pubkey: PublicKey, name: String, uid: Uid, addr: SocketAddr, db_path: String }
 
 /// Throwaway localhost listener (Connection::new needs one; we never accept on it).
 async fn bind_local() -> Result<(SocketAddr, TcpListener)> {
@@ -202,23 +202,34 @@ async fn bind_local() -> Result<(SocketAddr, TcpListener)> {
 /// Admin: owns the chat via Chat::new.
 async fn admin(name: &str, room: &str) -> Result<Node> {
     let (addr, listener) = bind_local().await?;
-    let (chat, prvkey, _pub, user_id, _pid, peermap) = Chat::new(room, name, addr.port()).await?;
+    let (chat, prvkey, pubkey, user_id, _pid, peermap) = Chat::new(room, name, addr.port()).await?;
+    let uid = Uid::getuid();
     let mut conn = Connection::new(prvkey, "127.0.0.1:65000".parse().unwrap(), (addr, listener), peermap).await;
-    conn.set_user(user_id, name.to_string(), Uid::getuid());
-    Ok(Node { conn, chat, user_id, db_path: format!("{name}__{room}.db") })
+    conn.set_user(user_id, name.to_string(), uid);
+    Ok(Node { conn, chat, user_id, pubkey, name: name.into(), uid, addr, db_path: format!("{name}__{room}.db") })
 }
 
 /// Member: db born from the admin's snapshot exactly as acceptance does (Chat::join).
 async fn join(admin: &Node, name: &str, room: &str) -> Result<Node> {
     let (addr, listener) = bind_local().await?;
-    let (_peer, prvkey) = Peer::new_out(-1, addr.port())?;
+    let (peer, prvkey) = Peer::new_out(-1, addr.port())?;
+    let pubkey = peer.get_pubkey();
     let uid = Uid::getuid();
     let snapshot = admin.chat.db.dump().await?;
     let chat = Chat::join(room, name, &prvkey, uid, addr.port(), snapshot).await?;
     let user_id = chat.current_user.get_id();
     let mut conn = Connection::new(prvkey, "127.0.0.1:65000".parse().unwrap(), (addr, listener), HashMap::new()).await;
     conn.set_user(user_id, name.to_string(), uid);
-    Ok(Node { conn, chat, user_id, db_path: format!("{name}__{room}.db") })
+    Ok(Node { conn, chat, user_id, pubkey, name: name.into(), uid, addr, db_path: format!("{name}__{room}.db") })
+}
+
+/// Admin learns a member into its db + members (what accept/send_newpeer establishes).
+async fn learn(admin: &Node, m: &Node) -> Result<()> {
+    let key = m.pubkey.to_bytes().encode_hex::<String>();
+    admin.chat.db.create_user(key.clone(), m.name.clone(), m.uid).await?;
+    admin.chat.db.create_peer_with(m.pubkey, [m.addr; 3], m.user_id).await?;
+    admin.chat.members.write().unwrap().insert(m.user_id, User::new(key, m.name.clone(), m.uid));
+    Ok(())
 }
 
 /// Author a message straight into a node's own db (what send_message persists locally).
@@ -228,18 +239,28 @@ async fn say(n: &Node, msg: &str) -> Result<()> {
     Ok(())
 }
 
-/// Merge src's whole db into dst through the app's real db-sync handler.
-async fn merge(dst: &Node, src: &Node) -> Result<()> {
-    let payload = serde_json::to_vec(&src.chat.db.dump().await?)?;
-    dst.conn.read_db_sync(&dst.chat, payload).await
-}
-
-/// One reconciliation pass for a star around the admin: gather every member into
-/// the admin, then push the admin's union back out — leaves all copies identical.
-async fn sync(alice: &Node, members: &[&Node]) -> Result<()> {
-    for m in members { merge(alice, m).await?; }
-    for m in members { merge(m, alice).await?; }
-    Ok(())
+/// Build the DBS wire payload from a db exactly as send_db_sync does (3 canonical zipped
+/// components, length-framed, then serde-wrapped like the DBS frame), to feed read_db_sync.
+async fn sync_payload(db: &Database) -> Result<Vec<u8>> {
+    let mut msgs: Vec<(u64, i64, String)> = db.load_all_messages().await?
+        .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+    msgs.sort_by_key(|a| (a.1, a.0));
+    let mut usrs: Vec<(u64, String, Option<String>, u32)> = db.load_all_users().await?
+        .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
+    usrs.sort_by_key(|u| u.0);
+    let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = db.load_all_peers().await?
+        .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
+    pirs.sort_by_key(|a| a.0);
+    let mut framed = Vec::new();
+    for blob in [
+        lz4_flex::compress_prepend_size(&serde_json::to_vec(&msgs)?),
+        lz4_flex::compress_prepend_size(&serde_json::to_vec(&usrs)?),
+        lz4_flex::compress_prepend_size(&serde_json::to_vec(&pirs)?),
+    ] {
+        framed.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&blob);
+    }
+    Ok(serde_json::to_vec(&framed)?)
 }
 
 async fn msg_set(db: &Database) -> Result<Vec<(u64, String, i64)>> {
@@ -255,56 +276,40 @@ async fn user_set(db: &Database) -> Result<Vec<(u64, String)>> {
     Ok(v)
 }
 
+/// The new buffered decider: messages are always the union (additive), the roster follows
+/// the admin (the admin keeps its own; a member adopts the admin's). With an empty peermap
+/// the online count is 0, so each read_db_sync triggers decide_sync immediately.
 #[tokio::test]
-async fn test_three_user_convergence() -> Result<()> {
-    let room = "room";
+async fn test_decide_sync() -> Result<()> {
+    let room = "syncroom";
     let alice = admin("alice", room).await?;
     let bob = join(&alice, "bob", room).await?;
     let carol = join(&alice, "carol", room).await?;
+    learn(&alice, &bob).await?;   // admin holds the full roster, as accept would establish
+    learn(&alice, &carol).await?;
 
-    // Pair (alice, bob); carol away.
-    say(&alice, "alice: hi bob").await?;
-    say(&bob, "bob: hi alice").await?;
-    say(&carol, "carol: noted while AB chatted").await?;
-    sync(&alice, &[&bob, &carol]).await?;
+    say(&alice, "a1").await?;
+    say(&bob, "b1").await?;
+    say(&carol, "c1").await?;
 
-    // Pair (alice, carol); bob away.
-    say(&alice, "alice: hi carol").await?;
-    say(&carol, "carol: hi alice").await?;
-    say(&bob, "bob: noted while AC chatted").await?;
-    sync(&alice, &[&bob, &carol]).await?;
-
-    // Pair (bob, carol); alice away.
-    say(&bob, "bob: hi carol").await?;
-    say(&carol, "carol: hi bob").await?;
-    say(&alice, "alice: noted while BC chatted").await?;
-    sync(&alice, &[&bob, &carol]).await?;
-
-    // Each speaking by themselves, then a final reconciliation.
-    say(&alice, "alice: solo").await?;
-    say(&bob, "bob: solo").await?;
-    say(&carol, "carol: solo").await?;
-    sync(&alice, &[&bob, &carol]).await?;
-
-    // All three copies are now identical (messages + users).
+    // Additive on the admin: buffer both members' syncs (empty peermap → online 0, no auto-decide),
+    // then collapse → messages union; roster stays alice's.
+    let pb = sync_payload(&bob.chat.db).await?;
+    alice.conn.read_db_sync(&alice.chat, bob.user_id, pb).await?;
+    let pc = sync_payload(&carol.chat.db).await?;
+    alice.conn.read_db_sync(&alice.chat, carol.user_id, pc).await?;
+    alice.conn.decide_sync(&alice.chat).await?;
     let a = msg_set(&alice.chat.db).await?;
-    assert_eq!(a, msg_set(&bob.chat.db).await?, "bob's messages match alice's");
-    assert_eq!(a, msg_set(&carol.chat.db).await?, "carol's messages match alice's");
+    for c in ["a1", "b1", "c1"] { assert!(a.iter().any(|(_, x, _)| x == c), "admin missing {c} (additive)"); }
+    assert_eq!(user_set(&alice.chat.db).await?.len(), 3, "admin kept its own roster (alice, bob, carol)");
 
-    let ua = user_set(&alice.chat.db).await?;
-    assert_eq!(ua, user_set(&bob.chat.db).await?, "bob's users match");
-    assert_eq!(ua, user_set(&carol.chat.db).await?, "carol's users match");
-    assert_eq!(ua.len(), 3, "alice, bob, carol all present");
-
-    // Every authored message (pairs + away + solo) reached all three.
-    for content in [
-        "alice: hi bob", "bob: hi alice", "carol: noted while AB chatted",
-        "alice: hi carol", "carol: hi alice", "bob: noted while AC chatted",
-        "bob: hi carol", "carol: hi bob", "alice: noted while BC chatted",
-        "alice: solo", "bob: solo", "carol: solo",
-    ] {
-        assert!(a.iter().any(|(_, c, _)| c == content), "missing message: {content}");
-    }
+    // Admin authority on a member: bob ingests the admin's sync → adopts its roster + all msgs.
+    let pa = sync_payload(&alice.chat.db).await?;
+    bob.conn.read_db_sync(&bob.chat, alice.user_id, pa).await?;
+    bob.conn.decide_sync(&bob.chat).await?;
+    assert_eq!(user_set(&bob.chat.db).await?, user_set(&alice.chat.db).await?, "bob adopted the admin's roster");
+    let bm = msg_set(&bob.chat.db).await?;
+    for c in ["a1", "b1", "c1"] { assert!(bm.iter().any(|(_, x, _)| x == c), "bob missing {c} (additive)"); }
 
     for n in [&alice, &bob, &carol] { let _ = std::fs::remove_file(&n.db_path); }
     Ok(())
