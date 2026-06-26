@@ -6,6 +6,15 @@ use hex::ToHex;
 use anyhow::Result;
 use x25519_dalek::StaticSecret;
 
+/// RAII auto-cleanup for file-backed test dbs — removes them on Drop, panic-safe.
+struct DbGuard(Vec<String>);
+impl DbGuard {
+    fn new<const N: usize>(files: [&str; N]) -> Self { Self(files.iter().map(|s| s.to_string()).collect()) }
+}
+impl Drop for DbGuard {
+    fn drop(&mut self) { for f in &self.0 { let _ = std::fs::remove_file(f); } }
+}
+
 struct TestDb {
     pub db: Database,
 }
@@ -74,7 +83,7 @@ async fn test_create_read_peer() -> Result<()> {
     assert_eq!(peer.get_addrs()[1].port(), 6967);
     // The db column holds all 3 addresses, and read_peer loads them back.
     assert_eq!(peer.get_addrs(), created.get_addrs(), "all 3 addresses round-trip through the db");
-    assert_eq!(peer.get_addrs().len(), 3);
+    assert_eq!(peer.get_addrs().len(), 2);
     assert!(peer.get_addrs()[0].ip().is_loopback(), "loopback preserved");
 
     Ok(())
@@ -153,7 +162,6 @@ async fn test_update_peer() -> Result<()> {
     let new_addrs = [
         "127.0.0.1:9090".parse()?,
         "192.168.1.100:9090".parse()?,
-        "1.2.3.4:9090".parse()?,
     ];
     let updated = db.update_peer_addrs(peer.get_id(), new_addrs).await?;
     assert!(updated);
@@ -255,7 +263,7 @@ async fn test_delete() -> Result<()> {
 #[tokio::test]
 async fn test_delete_user_with_refs() -> Result<()> {
     let path = "test_delete_user_with_refs.db";
-    let _ = std::fs::remove_file(path);
+    let _db_guard = DbGuard::new([path]);
     let db = Database::new(path)?;
     let (peer, _) = db.create_peer(8081).await?;
     let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
@@ -265,7 +273,6 @@ async fn test_delete_user_with_refs() -> Result<()> {
     assert!(db.delete_user(user.get_id()).await?, "delete reported a change");
     assert!(db.read_user(user.get_id()).await?.is_none(), "user row gone despite peer + message refs");
     assert!(db.load_all_messages().await?.iter().any(|m| m.get_contents() == "hi"), "message kept");
-    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
@@ -350,9 +357,10 @@ async fn test_save_all() -> Result<()> {
     let mut msg3 = Message::new(-2, user2.get_id(), "Memory 2".to_string());
     msg3.set_date(time::OffsetDateTime::now_utc().unix_timestamp() + 100);
 
-    // Save messages (add msg2 and msg3, delete msg1)
+    // Save messages — ADDITIVE (insert-only by identity, never deletes). "In DB" stays; msg2 and
+    // msg3 are added → 3 total. (Messages are never deleted; a kicked user's are kept [REDACTED].)
     let messages_saved = db.save_all_messages(vec![msg2.clone(), msg3.clone()]).await?;
-    assert_eq!(messages_saved, 2);
+    assert_eq!(messages_saved, 3);
     
     // NOW load and verify everything
     
@@ -369,12 +377,12 @@ async fn test_save_all() -> Result<()> {
     assert!(loaded_users.iter().any(|u| u.get_name() == "charlie" && u.get_role() == Some(Role::Admin)));
     assert!(loaded_users.iter().any(|u| u.get_name() == "dave"));
     
-    // Verify messages
+    // Verify messages — additive: all three present (nothing deleted).
     let loaded_messages = db.load_all_messages().await?;
-    assert_eq!(loaded_messages.len(), 2);
+    assert_eq!(loaded_messages.len(), 3);
     assert!(loaded_messages.iter().any(|m| m.get_contents() == "Memory 1"));
     assert!(loaded_messages.iter().any(|m| m.get_contents() == "Memory 2"));
-    assert!(!loaded_messages.iter().any(|m| m.get_contents() == "In DB"));
+    assert!(loaded_messages.iter().any(|m| m.get_contents() == "In DB"));
 
     Ok(())
 }
@@ -411,8 +419,7 @@ async fn test_dump_load() -> Result<()> {
 #[tokio::test]
 async fn test_load_persists_to_disk() -> Result<()> {
     let (src_path, dst_path) = ("loadpersist__src.db", "loadpersist__dst.db");
-    let _ = std::fs::remove_file(src_path);
-    let _ = std::fs::remove_file(dst_path);
+    let _db_guard = DbGuard::new([src_path, dst_path]);
 
     let src = Database::new(src_path)?;
     let (peer, _) = src.create_peer(9000).await?;
@@ -431,8 +438,5 @@ async fn test_load_persists_to_disk() -> Result<()> {
     assert!(reopened.load_all_users().await?.iter().any(|u| u.get_name() == "src_user"),
         "load persisted across reopen");
     drop(reopened);
-
-    let _ = std::fs::remove_file(src_path);
-    let _ = std::fs::remove_file(dst_path);
     Ok(())
 }

@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident, $requests: ident) => {
         let mut max_offset: u16 = 0;
         $terminal.draw(|f| {
             let size = f.area();
@@ -43,6 +43,24 @@ macro_rules! chat {
                     .filter_map(|(id, _)| members.get(&id).map(|u| u.get_name()))
                     .collect();
                 (!names.is_empty()).then_some(names)
+            };
+            // Status indicator (shown in the typing slot when no one is typing and we haven't
+            // started typing): admin → pending join requests; anyone → "reached peers" once the
+            // mesh is fully met up + synced. Typing and our own input both take priority.
+            let status_indicator: Option<Line> = if typing.is_some() || !$input.is_empty() {
+                None
+            } else if $chat.current_user.get_role() == Some(Role::Admin)
+                && { let r = $requests.lock().unwrap().len(); r > 0 } {
+                let r = $requests.lock().unwrap().len();
+                // Bold the count, like the names in the typing indicator.
+                Some(Line::from(vec![
+                    Span::styled(format!("{}", r), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(format!(" request{} waiting", if r == 1 { "" } else { "s" })),
+                ]))
+            } else if $conn.reached_and_synced().is_some() {
+                Some(Line::from("connected to peers"))
+            } else {
+                None
             };
 
             // TUI screen separation
@@ -167,9 +185,9 @@ macro_rules! chat {
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($choice.clone()).alignment(Alignment::Center));
 
-            // Typing indicator
+            // Typing indicator (falls back to the status indicator when no one is typing)
             let mut typers: Line = match typing {
-                None => Line::from(""),
+                None => status_indicator.unwrap_or_else(|| Line::from("")),
                 Some(list) if list.is_empty() => Line::from(""),
                 Some(list) => {
                     let n = list.len();

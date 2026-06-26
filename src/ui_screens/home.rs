@@ -11,7 +11,7 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $chat_slot: ident, $join_keys: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $chat_slot: ident, $join_keys: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident, $interfaces: ident, $iface: ident) => {
         // Validity checks
         let combo_exists = !$chat_name_input.is_empty() && !$user_name_input.is_empty() &&
             $chats.available.contains(&format!("{} @ {}", $user_name_input, $chat_name_input));
@@ -59,9 +59,9 @@ macro_rules! home {
             let vertical_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length((size.height.saturating_sub(ascii_height + 14)) / 2),
+                    Constraint::Length((size.height.saturating_sub(ascii_height + 17)) / 2),
                     Constraint::Length(ascii_height),
-                    Constraint::Length(14),
+                    Constraint::Length(17),
                     Constraint::Min(0),
                 ])
                 .split(size);
@@ -100,18 +100,11 @@ macro_rules! home {
             let lines_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
+                    Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+                    Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+                    Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+                    Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
+                    Constraint::Length(1), Constraint::Length(1), Constraint::Length(1),
                 ])
                 .split(inner);
 
@@ -150,14 +143,14 @@ macro_rules! home {
                 .alignment(Alignment::Center)
                 .style(Style::default().bg($config.bg_color));
 
-            frame.render_widget(hop_header, lines_layout[0]);
-            frame.render_widget(hop_paragraph, lines_layout[2]);
+            frame.render_widget(hop_header, lines_layout[3]);
+            frame.render_widget(hop_paragraph, lines_layout[5]);
 
             // Separator
             let separator = Paragraph::new("─".repeat(center_area.width.saturating_sub(2) as usize))
                 .alignment(Alignment::Center)
                 .style(Style::default().fg($config.border_color).bg($config.bg_color));
-            frame.render_widget(&separator, lines_layout[3]);
+            frame.render_widget(&separator, lines_layout[6]);
 
             // Line: "create new chat"
             let create_active = $active_section == 1;
@@ -174,7 +167,7 @@ macro_rules! home {
             )
             .alignment(Alignment::Center)
             .style(Style::default().bg($config.bg_color));
-            frame.render_widget(create_header, lines_layout[4]);
+            frame.render_widget(create_header, lines_layout[7]);
 
             // Chat name field
             let chat_name_color = if chat_name_valid {
@@ -198,7 +191,7 @@ macro_rules! home {
             let chat_name_line = Line::from(chat_name_spans);
             let chat_name_paragraph = Paragraph::new(chat_name_line)
                 .style(Style::default().bg($config.bg_color));
-            frame.render_widget(chat_name_paragraph, lines_layout[5]);
+            frame.render_widget(chat_name_paragraph, lines_layout[8]);
 
             // User name field
             let user_name_color = if !combo_exists {
@@ -222,7 +215,7 @@ macro_rules! home {
             let user_name_line = Line::from(user_name_spans);
             let user_name_paragraph = Paragraph::new(user_name_line)
                 .style(Style::default().bg($config.bg_color));
-            frame.render_widget(user_name_paragraph, lines_layout[6]);
+            frame.render_widget(user_name_paragraph, lines_layout[9]);
 
             // Rendezvous address field
             let rendezvous_color = if rendezvous_valid {
@@ -246,10 +239,10 @@ macro_rules! home {
             let rendezvous_line = Line::from(rendezvous_spans);
             let rendezvous_paragraph = Paragraph::new(rendezvous_line)
                 .style(Style::default().bg($config.bg_color));
-            frame.render_widget(rendezvous_paragraph, lines_layout[7]);
+            frame.render_widget(rendezvous_paragraph, lines_layout[10]);
 
             // Separator
-            frame.render_widget(&separator, lines_layout[8]);
+            frame.render_widget(&separator, lines_layout[11]);
 
             // Line: "join new chat"
             let join_active = $active_section == 2;
@@ -266,7 +259,7 @@ macro_rules! home {
             )
             .alignment(Alignment::Center)
             .style(Style::default().bg($config.bg_color));
-            frame.render_widget(join_header, lines_layout[9]);
+            frame.render_widget(join_header, lines_layout[12]);
 
             // Join user name field
             let join_user_name_active = join_active && $active_field == 0;
@@ -283,7 +276,7 @@ macro_rules! home {
             let join_user_name_line = Line::from(join_user_name_spans);
             let join_user_name_paragraph = Paragraph::new(join_user_name_line)
                 .style(Style::default().bg($config.bg_color));
-            frame.render_widget(join_user_name_paragraph, lines_layout[10]);
+            frame.render_widget(join_user_name_paragraph, lines_layout[13]);
 
             // Join rendezvous address field
             let join_rendezvous_active = join_active && $active_field == 1;
@@ -300,7 +293,24 @@ macro_rules! home {
             let join_rendezvous_line = Line::from(join_rendezvous_spans);
             let join_rendezvous_paragraph = Paragraph::new(join_rendezvous_line)
                 .style(Style::default().bg($config.bg_color));
-            frame.render_widget(join_rendezvous_paragraph, lines_layout[11]);
+            frame.render_widget(join_rendezvous_paragraph, lines_layout[14]);
+
+            // Interface section (active_section == -1): header + selector, Left/Right cycles it.
+            let iface_active = $active_section == -1;
+            let iface_label_color = if iface_active { $config.text_color } else { $config.border_color };
+            let iface_header = Paragraph::new(Line::from(Span::styled("network interface", iface_label_color)))
+                .alignment(Alignment::Center).style(Style::default().bg($config.bg_color));
+            let ifaces = $interfaces.lock().unwrap();
+            let iface_name = ifaces.get($iface).map(|(n, ip)| format!("{n} {ip}")).unwrap_or_else(|| "default".to_string());
+            let iface_line = Line::from(vec![
+                Span::styled("< ", Style::default().fg(iface_label_color)),
+                Span::styled(iface_name, Style::default().fg($config.my_color)),
+                Span::styled(" >", Style::default().fg(iface_label_color)),
+            ]);
+            drop(ifaces);
+            frame.render_widget(iface_header, lines_layout[0]);
+            frame.render_widget(Paragraph::new(iface_line).alignment(Alignment::Center).style(Style::default().bg($config.bg_color)), lines_layout[1]);
+            frame.render_widget(&separator, lines_layout[2]);
         })?;
 
         // Handle input
@@ -311,7 +321,9 @@ macro_rules! home {
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
 
                         KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if $active_section == 1 && $active_field > 0 {
+                            if $active_section == 0 {
+                                $active_section = -1;
+                            } else if $active_section == 1 && $active_field > 0 {
                                 $active_field -= 1;
                             } else if $active_section == 1 && $active_field == 0 {
                                 $active_section = 0;
@@ -323,7 +335,9 @@ macro_rules! home {
                             }
                         }
                         KeyCode::Up => {
-                            if $active_section == 1 && $active_field > 0 {
+                            if $active_section == 0 {
+                                $active_section = -1;
+                            } else if $active_section == 1 && $active_field > 0 {
                                 $active_field -= 1;
                             } else if $active_section == 1 && $active_field == 0 {
                                 $active_section = 0;
@@ -334,8 +348,10 @@ macro_rules! home {
                                 $active_field = 2;
                             }
                         }
-                        KeyCode::Char('j') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if $active_section == 0 {
+                        KeyCode::Char('j') if $active_section == -1 || $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if $active_section == -1 {
+                                $active_section = 0;
+                            } else if $active_section == 0 {
                                 $active_section = 1;
                                 $active_field = 0;
                             } else if $active_section == 1 && $active_field < 2 {
@@ -348,7 +364,9 @@ macro_rules! home {
                             }
                         }
                         KeyCode::Down => {
-                            if $active_section == 0 {
+                            if $active_section == -1 {
+                                $active_section = 0;
+                            } else if $active_section == 0 {
                                 $active_section = 1;
                                 $active_field = 0;
                             } else if $active_section == 1 && $active_field < 2 {
@@ -359,6 +377,14 @@ macro_rules! home {
                             } else if $active_section == 2 && $active_field < 1 {
                                 $active_field += 1;
                             }
+                        }
+                        KeyCode::Left | KeyCode::Char('h') if $active_section == -1 => {
+                            let n = $interfaces.lock().unwrap().len();
+                            if n > 0 { $iface = if $iface == 0 { n - 1 } else { $iface - 1 }; }
+                        }
+                        KeyCode::Right | KeyCode::Char('l') if $active_section == -1 => {
+                            let n = $interfaces.lock().unwrap().len();
+                            if n > 0 { $iface = ($iface + 1) % n; }
                         }
                         KeyCode::Left | KeyCode::Char('h') if $active_section == 0 => {
                             if $chats.choice > 0 {
@@ -392,10 +418,11 @@ macro_rules! home {
                                 let user_name = $config.user_name.clone().unwrap_or_default();
                                 let users = Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
                                 let is_admin = users.iter().any(|u| u.get_name() == user_name && u.get_role() == Some(Role::Admin));
+                                let iface = $interfaces.lock().unwrap().get($iface).map(|(n, _)| n.clone());
                                 let cc = if is_admin {
-                                    startstuffold(&$choice, &$config, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?
+                                    startstuffold(&$choice, &$config, iface, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?
                                 } else {
-                                    joinstuffold(&$choice, &$config, $token.clone(), &mut $run_once).await?
+                                    joinstuffold(&$choice, &$config, iface, $token.clone(), &mut $run_once).await?
                                 };
                                 $chat_2_delete = None;
                                 $conn = Some(cc.0);
@@ -409,7 +436,8 @@ macro_rules! home {
                                 1 if user_name_valid => $active_field = 2,
                                 2 if rendezvous_valid && chat_name_valid && user_name_valid => {
                                     $choice = $chat_name_input.clone();
-                                    let ccpu = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
+                                    let iface = $interfaces.lock().unwrap().get($iface).map(|(n, _)| n.clone());
+                                    let ccpu = startstuffnew(&$choice, &$user_name_input, &$rendezvous_input, iface, Arc::clone(&$requests), $token.clone(), &mut $run_once).await?;
                                     $conn = Some(ccpu.0);
                                     $chat = Some(ccpu.1);
                                     let prvkey = ccpu.2;
@@ -424,7 +452,8 @@ macro_rules! home {
                             match $active_field {
                                 0 if user_name_valid => $active_field = 1,
                                 1 if rendezvous_valid && user_name_valid => {
-                                    let jc = joinstuffnew(&$user_name_input, &$rendezvous_input, $token.clone(), &mut $run_once).await?;
+                                    let iface = $interfaces.lock().unwrap().get($iface).map(|(n, _)| n.clone());
+                                    let jc = joinstuffnew(&$user_name_input, &$rendezvous_input, iface, $token.clone(), &mut $run_once).await?;
                                     $conn = Some(jc.0);
                                     $chat_slot = Some(jc.1);
                                     $join_keys = Some((jc.2, jc.4));

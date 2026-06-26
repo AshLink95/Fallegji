@@ -27,12 +27,12 @@ impl Message {
         Self { id, sender_id, contents, sent_at }
     }
 
+    #[allow(unused)]
     pub fn get_id(&self) -> i32 { self.id }
     pub fn get_sender_id(&self) -> u64 { self.sender_id }
     pub fn get_contents(&self) -> String { self.contents.clone() }
     pub fn get_sent_at(&self) -> i64 { self.sent_at }
 
-    pub fn set_contents(&mut self, contents: String) { self.contents = contents; }
     pub fn set_date(&mut self, date: i64) { self.sent_at = date; }
 }
 

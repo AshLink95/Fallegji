@@ -10,8 +10,16 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 <!-- Connection Types (P2P and group chats) -->
 
+# General checklist
+- [ ] Impose name (user and chat) size limit along with msg size
+- [ ] Elegant error handling. Show red text instead of exisiting the app (ranonce doesn't always reset when back in home.rs)
+- [ ] auto rename when new user shares an existing user's name
+- [ ] send notifications
+- [ ] allow `\` commands in-text
+- [ ] allow sending files
+- [ ] allow sending videostream and soundstream (allowing for vc with cam by opening a browser)
+
 # advanced VIM motions checklist:
-- [ ] allow messages scrolling (`<C-j/k>`)
 - [ ] Implement `iw`, `i(`, `aw`, `a[` and such sequences
 - [ ] Implement `f`, `F`, `t` and `T`
 - [ ] replace and replace mode
@@ -20,16 +28,6 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 - [ ] Implement searching with `/` and `?`
 - [ ] input scrolling (more natural)
 - [ ] Macros (might be a stretch)
-
-# General checklist
-- [ ] Impose name (user and chat) size limit along with msg size
-- [ ] Elegant error handling. Show red text instead of exisiting the app
-- [ ] auto rename when new user shares an existing user's name
-- [ ] make delete db merges only valid from admin (user kicked for example)
-- [ ] send notifications
-- [ ] allow `\` commands in-text
-- [ ] allow sending files
-- [ ] allow sending videostream and soundstream (allowing for vc with cam by opening a browser)
 
 
 # Home Menu

@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, LinkedList}, net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, LinkedList}, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use anyhow::{Context, Error, Result};
 use hex::ToHex;
 use sha2::Sha256;
@@ -8,10 +8,9 @@ use tokio_util::sync::CancellationToken;
 use x25519_dalek::{PublicKey, StaticSecret};
 use hkdf::Hkdf;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, KeyInit, Nonce, aead::{Aead, OsRng}};
-use tokio::{net::{TcpStream, TcpListener}, io::{AsyncReadExt, AsyncWriteExt}, sync::Mutex as TokioMutex};
+use tokio::{net::{TcpStream, TcpListener, UdpSocket}, io::{AsyncReadExt, AsyncWriteExt}, sync::Mutex as TokioMutex};
 use crate::{auth::{Authentication, User, Uid, Role}, db::Database, messaging::{Message, Chat}};
 
-// Packet header bytes
 const MSG_HD: u8 = 0xF1;
 const HBT_HD: u8 = 0xE2;
 const TYP_HD: u8 = 0xD3;
@@ -19,12 +18,17 @@ const DBS_HD: u8 = 0xC4;
 const DBR_HD: u8 = 0xB5;
 const NWP_HD: u8 = 0xA6;
 const KCK_HD: u8 = 0x97;
+const AVP_HD: u8 = 0x88;
+const EVI_HD: u8 = 0x79;
+const OWN_HD: u8 = 0x6A;
+
+const SYNC_COOLDOWN: Duration = Duration::from_millis(1200);
 
 #[derive(Debug, Clone)]
 pub struct Peer {
     id: i32,
     user_id: Option<u64>, // Users get created after peers
-    addrs: [SocketAddr; 3], // [localhost, pre-NAT (LAN), post-NAT (public)]
+    addrs: [SocketAddr; 2], // [localhost, LAN]
     pubkey: PublicKey,
     last_heartbeat: Option<i64>,
     last_seen_typing: Option<i64>
@@ -40,7 +44,7 @@ pub trait KeyGen {
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
 
 /// Pending join requests awaiting admin accept/reject: (addrs, name, pubkey, uid).
-pub type Requests = Arc<Mutex<Vec<([SocketAddr; 3], String, PublicKey, u32)>>>;
+pub type Requests = Arc<Mutex<Vec<([SocketAddr; 2], String, PublicKey, u32)>>>;
 
 /// A joiner's chat is born only once the admin accepts (the NWP carries the DB).
 /// Until then the joiner has just its `Connection` up; `listen` fills this slot.
@@ -52,16 +56,16 @@ struct DbSyncBuf {
     usrs: LinkedList<Vec<u8>>,
     pirs: LinkedList<Vec<u8>>,
     admin_rank: Option<u8>,
-    rcv_count: u8, // syncs buffered this round; decide once it reaches the online-peer count
-    first_at: Option<Instant>, // when this round's first sync landed; decide after the cooldown
+    rcv_count: u8,
+    first_at: Option<Instant>,
 }
 
 pub struct Connection {
     prvkey: StaticSecret,
     socket: Mutex<(SocketAddr, Arc<TcpListener>)>,
     peers: Arc<Mutex<Peermap>>,
-    rendezvous: (SocketAddr, Mutex<Option<Arc<TcpListener>>>),
-    db_sync_buf: Mutex<DbSyncBuf>, // interior mutability: read_db_sync buffers via &self
+    rendezvous: (SocketAddr, Mutex<Option<Arc<UdpSocket>>>),
+    db_sync_buf: Mutex<DbSyncBuf>,
     user: Option<(u64, String, Uid)>,
 }
 
@@ -76,15 +80,18 @@ pub trait Secrecy {
 /// `fallback_lookup/send` re-establish routing when the rendezvous holder drops.
 #[allow(async_fn_in_trait)]
 pub trait RendezVous {
-    /// Admin-side handshake responder
-    async fn rcv_requests(&self, requests: Requests, token: CancellationToken) -> Result<()>;
-    /// Newcomer-side handshake initiator
+    /// Rendezvous **holder** loop (UDP). Serves new-member join requests (plaintext handshake)
+    /// AND recovery packets from known peers: an `OWN_HD` (a peer's fresh 2 IPs) → update that
+    /// peer's entry; an `EVI_HD` from the admin → unbind and yield the rendezvous.
+    async fn rcv_requests(&self, requests: Requests, token: CancellationToken, is_admin: bool) -> Result<()>;
+    /// Newcomer-side join handshake initiator (plaintext name/addrs/pubkey → admin key).
     async fn snd_requests(&self, name: String) -> Result<bool>;
 
-    /// Try to become the new rendezvous holder. If address is taken, connect instead.
-    /// Returns true if we bound (became holder), false if we connected.
+    /// Try to become the rendezvous holder by binding the UDP address. true = we hold it
+    /// (and wait for peers' info), false = it's taken (someone else holds it).
     async fn fallback_lookup(&self) -> Result<bool>;
-    /// Re-announce presence to rendezvous holder so they can accept_peer
+    /// Send our own info to the current holder: an encrypted `OWN_HD` (our 2 IPs) so the holder
+    /// updates + relays our entry. (If we're the admin facing a peer-held rendezvous, evict first.)
     async fn fallback_send(&self, name: String) -> Result<bool>;
 }
 
@@ -95,19 +102,32 @@ pub trait Communication {
     /// Stops the accept loop and every per-connection reader when `token` is cancelled.
     async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()>;
 
-    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()>;
+    async fn send_newpeer(&self, addrs: [SocketAddr; 2], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()>;
 
     async fn send_msg(&self, msg: Message) -> Result<()>;
     async fn read_msg(&self, chat: &Chat, payload: Vec<u8>) -> Result<()>;
 
     async fn send_heartbeat(&self) -> Result<()>;
-    async fn read_heartbeat(&self, chat: &Chat, peer_id: u64) -> Result<()>;
+    /// Records the heartbeat and returns whether the peer just came online (offline → online
+    /// transition). The caller pushes a db sync on a transition (a (re)join) — done off the reader
+    /// loop so the heavy sync doesn't stall frame reading.
+    async fn read_heartbeat(&self, chat: &Chat, peer_id: u64) -> Result<bool>;
 
     async fn send_typing(&self) -> Result<()>;
     async fn read_typing(&self, peer_id: u64) -> Result<()>;
 
+    /// Send three separately-zipped components — messages, users, peers, in that order —
+    /// length-framed as [u32 len][zip]×3. Each is serialized from canonical (sorted) rows
+    /// stripped of volatile/local fields (autoincrement id, heartbeat) so identical logical
+    /// state produces identical bytes — the buffer/decider votes on these.
     async fn send_db_sync(&self, db: &Database) -> Result<()>;
+    /// Classifier: split the length-framed [u32 len][zip]×3 (messages, users, peers) and stash
+    /// each zip into `db_sync_buf`, tagging the admin's entry via `admin_rank`. The bg decider
+    /// collapses the buffer later (admin-authoritative roster, union messages).
     async fn read_db_sync(&self, chat: &Chat, peer_id: u64, payload: Vec<u8>) -> Result<()>;
+    /// Collapse the buffered syncs into the db. Roster (users+peers): the admin's copy if we
+    /// got one, else the most common version (our own included). Messages: always the union of
+    /// everyone's (new ones never dropped), deduped by identity. Persisted via save_all_*.
     async fn decide_sync(&self, chat: &Chat) -> Result<()>;
 
     async fn send_db_req(&self, chat: &Chat) -> Result<()>;
@@ -134,7 +154,7 @@ impl Peer {
 
     /// new imported peer
     #[allow(clippy::too_many_arguments)]
-    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addrs: [SocketAddr; 3], pubkey: PublicKey, last_seen_typing: Option<i64>, last_heartbeat: Option<i64>) -> Result<Self> {
+    pub fn new_in(id:i32, peer_name: String, peer_uid: Uid, peer_user_id: u64, addrs: [SocketAddr; 2], pubkey: PublicKey, last_seen_typing: Option<i64>, last_heartbeat: Option<i64>) -> Result<Self> {
         let key: String = pubkey.encode_hex();
         let user = User::new(key.clone(), peer_name.clone(), peer_uid);
         if user.ver_id(key, peer_user_id) {
@@ -144,16 +164,16 @@ impl Peer {
         }
     }
 
-    /// Serialize the 3 addresses for the db (`addr` column) and the wire.
+    /// Serialize the 2 addresses ([localhost, LAN]) for the db (`addr` column) and the wire.
     pub fn addrs_string(&self) -> String {
         self.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
     }
-    /// Parse 3 comma-joined addresses; falls back to repeating a single one.
-    pub fn parse_addrs(s: &str) -> Option<[SocketAddr; 3]> {
+    /// Parse 2 comma-joined addresses; falls back to repeating a single one.
+    pub fn parse_addrs(s: &str) -> Option<[SocketAddr; 2]> {
         let v: Vec<SocketAddr> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         match v.len() {
-            3 => Some([v[0], v[1], v[2]]),
-            1 => Some([v[0], v[0], v[0]]),
+            2 => Some([v[0], v[1]]),
+            1 => Some([v[0], v[0]]),
             _ => None,
         }
     }
@@ -170,9 +190,9 @@ impl Peer {
 
     /// check if a peer is typing
     pub fn is_typing(&self) -> bool {
-        if let Some(time) = self.last_seen_typing {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            time + 1 > now
+        if self.is_online() && let Some(time) = self.last_seen_typing {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+            time + 1000 > now
         } else {
             false
         }
@@ -180,9 +200,11 @@ impl Peer {
 
     pub fn get_id(&self) -> i32 { self.id }
     pub fn get_user_id(&self) -> Option<u64> { self.user_id }
-    pub fn get_addrs(&self) -> [SocketAddr; 3] { self.addrs }
+    pub fn get_addrs(&self) -> [SocketAddr; 2] { self.addrs }
     pub fn get_pubkey(&self) -> PublicKey { self.pubkey }
     pub fn get_last_heartbeat(&self) -> Option<i64> { self.last_heartbeat }
+    #[allow(unused)]
+    pub fn get_last_seen_typing(&self) -> Option<i64> { self.last_seen_typing }
 
     pub fn set_id(&mut self, id: i32) { if self.id < 0 { self.id = id } }
     pub fn set_user_id(&mut self, user_name: String, user_id: u64, user_uid: Uid) -> Result<()> {
@@ -197,7 +219,7 @@ impl Peer {
         self.user_id = Some(user_id);
         Ok(())
     }
-    pub fn set_addrs(&mut self, addrs: [SocketAddr; 3]) { self.addrs = addrs }
+    pub fn set_addrs(&mut self, addrs: [SocketAddr; 2]) { self.addrs = addrs }
     pub fn set_last_seen_typing(&mut self, last_seen_typing: Option<i64>) {
         self.last_seen_typing = last_seen_typing;
     }
@@ -244,31 +266,35 @@ impl Connection {
     }
 
 
-    pub async fn monitor_ip(&self, db: Database) -> Result<()> { // bg task
+    pub async fn monitor_ip(&self, db: Database) -> Result<()> {
         loop {
-            let _ = self.refresh_addrs(&db).await; // refresh now (fetches public IP), then every 30s
+            let _ = self.refresh_addrs(&db).await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     }
 
-    /// One refresh pass: recompute our 3 addresses (LAN via UDP trick, public via
-    /// icanhazip), rebind on the same port if the LAN ip moved, update our own peer
-    /// in the peermap, persist it to the db, and re-announce on change.
+    /// One refresh pass: recompute our 3 addresses (LAN via UDP trick, public via icanhazip),
+    /// rebind if the IP moved (picking a free port in 1952–2025, like the initial bind, since the
+    /// old port may be taken on the new interface), update our peer in the peermap + db, and
+    /// re-announce on change.
     pub async fn refresh_addrs(&self, db: &Database) -> Result<()> {
-        let (curr_ip, port) = { let g = self.socket.lock().unwrap(); (g.0.ip(), g.0.port()) };
-        let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-        tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-        let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-        let public = public_ip().await.ok().map(|ip| SocketAddr::new(ip, port)); // best-effort
+        let (curr_ip, mut port) = { let g = self.socket.lock().unwrap(); (g.0.ip(), g.0.port()) };
+        let name = if_addrs::get_if_addrs().ok()
+            .and_then(|a| a.into_iter().find(|i| i.ip() == curr_ip).map(|i| i.name));
+        let lan_ip = bind_ip(name.as_deref()).unwrap_or(curr_ip);
 
         if lan_ip != curr_ip {
-            let addr = SocketAddr::new(lan_ip, port); // keep the chosen port
-            let listener = bind_listener(addr)?;
-            *self.socket.lock().unwrap() = (addr, Arc::new(listener));
+            for p in std::iter::once(port).chain(1952..=2025) {
+                if let Ok(listener) = bind_listener(SocketAddr::new(lan_ip, p)) {
+                    *self.socket.lock().unwrap() = (SocketAddr::new(lan_ip, p), Arc::new(listener));
+                    port = p;
+                    break;
+                }
+            }
         }
 
         let lan = SocketAddr::new(lan_ip, port);
-        let addrs = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), lan, public.unwrap_or(lan)];
+        let addrs = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), lan];
         if let Some(my_id) = self.user.as_ref().map(|u| u.0) {
             let db_id = {
                 let mut guard = self.peers.lock().unwrap();
@@ -286,11 +312,13 @@ impl Connection {
         Ok(())
     }
 
-    /// bg task: broadcast a keep-alive to peers once a second.
-    pub async fn heartbeat_loop(&self) -> Result<()> {
+    /// bg task: broadcast a keep-alive to peers once a second, and heal the mesh.
+    pub async fn heartbeat_loop(self: Arc<Self>) -> Result<()> {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let _ = self.send_heartbeat().await;
+            let me = Arc::clone(&self);
+            tokio::spawn(async move { me.connect_peers().await; });
         }
     }
 
@@ -299,42 +327,57 @@ impl Connection {
     pub async fn bind_rendezvous(&self) -> Result<()> {
         let bound = self.rendezvous.1.lock().unwrap().is_some();
         if !bound {
-            let listener = Arc::new(bind_listener(self.rendezvous.0)?);
-            *self.rendezvous.1.lock().unwrap() = Some(listener);
+            let sock = Arc::new(UdpSocket::bind(self.rendezvous.0).await?);
+            *self.rendezvous.1.lock().unwrap() = Some(sock);
         }
         Ok(())
     }
 
-    /// bg task: if no peer is reachable, try to become the rendezvous holder; if the
-    /// address is already taken, re-announce ourselves to whoever holds it.
-    pub async fn fallback(&self) -> Result<()> {
+    /// bg task: if *any* peer is offline, try to become the rendezvous holder; if the address
+    /// is already taken, re-announce ourselves to whoever holds it. (The offline peer reaches
+    /// the holder — the admin, if present — who updates its entry.)
+    pub async fn fallback(&self, token: CancellationToken) -> Result<()> {
         let name = self.user.as_ref().map(|u| u.1.clone()).unwrap_or_default();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if self.peers.lock().unwrap().values().any(|(p, _, _)| p.is_online()) {
-                continue;
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let me = self.user.as_ref().map(|(id, _, _)| *id);
+            let any_offline = self.peers.lock().unwrap().iter()
+                .filter(|(uid, _)| Some(**uid) != me)
+                .any(|(_, (p, _, _))| !p.is_online());
+            if !any_offline { continue; }
             match self.fallback_lookup().await {
-                Ok(true) => {}
+                Ok(true) => { let _ = self.rcv_requests(Arc::new(Mutex::new(Vec::new())), token.clone(), false).await; }
                 Ok(false) => { let _ = self.fallback_send(name.clone()).await; }
                 Err(_) => {}
             }
         }
     }
 
-    /// Resolve our 3 addresses live: [loopback, LAN, public], all on the bound port. Async
-    /// (public IP is an OpenDNS lookup); slot [2] falls back to LAN if it fails.
-    pub async fn current_addrs(&self) -> [SocketAddr; 3] {
-        let bound = self.socket.lock().unwrap().0; // actual LAN bind (guard drops here)
-        let mut a = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port()), bound, bound];
-        if let Ok(ip) = public_ip().await { a[2] = SocketAddr::new(ip, bound.port()); }
-        a
+    /// Our 2 addresses: [loopback, LAN] (the bound socket). No public — post-NAT isn't reachable.
+    pub fn current_addrs(&self) -> [SocketAddr; 2] {
+        let bound = self.socket.lock().unwrap().0;
+        [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port()), bound]
     }
 
     /// Snapshot of the peermap as (user_id, peer). The caller reads whatever it needs
     /// (addrs, presence, …) and filters out itself when appropriate.
     pub fn peer_list(&self) -> Vec<(u64, Peer)> {
         self.peers.lock().unwrap().iter().map(|(uid, (p, _, _))| (*uid, p.clone())).collect()
+    }
+
+    /// "Met up + synced": every ONLINE peer is also REACHED (we hold a send stream to it), there's
+    /// at least one such peer, and no db-sync round is mid-flight. Truthful: an online peer we can't
+    /// actually send to (no stream) → None. Offline peers don't block it (they're gone / at the
+    /// rendezvous). Returns the online peer count, else None — drives the "connected to peers" line.
+    pub fn reached_and_synced(&self) -> Option<usize> {
+        if self.db_sync_buf.lock().unwrap().first_at.is_some() { return None; }
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let online: Vec<bool> = self.peers.lock().unwrap().iter()
+            .filter(|(uid, _)| Some(**uid) != me)
+            .filter(|(_, (p, _, _))| p.is_online())
+            .map(|(_, (_, _, s))| s.is_some()) // reached = we have a send stream
+            .collect();
+        (!online.is_empty() && online.iter().all(|&reached| reached)).then_some(online.len())
     }
 
     /// First NWP for a chat-less joiner: build the chat from the admin's DB, fill the slot (the app loop enters the chat), wire up peers, and announce ourselves.
@@ -348,8 +391,8 @@ impl Connection {
         self.rebuild_peermap(&chat.db).await?;
         self.connect_peers().await;
         chat.send_join(self).await;
-        self.send_db_req(&chat).await?;   // request their db (admin replies with a sync to us)
-        self.send_db_sync(&chat.db).await?; // then push our own so they learn us
+        self.send_db_req(&chat).await?;
+        self.send_db_sync(&chat.db).await?;
         Ok(())
     }
 
@@ -360,66 +403,106 @@ impl Connection {
         let peers = db.load_all_peers().await?;
         let mut guard = self.peers.lock().unwrap();
         #[allow(clippy::type_complexity)]
-        let old: HashMap<[u8; 32], ([SocketAddr; 3], Option<Arc<TokioMutex<TcpStream>>>)> =
-            guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone()))).collect();
+        let old: HashMap<[u8; 32], ([SocketAddr; 2], Option<Arc<TokioMutex<TcpStream>>>, Option<i64>, Option<i64>)> =
+            guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone(), p.get_last_heartbeat(), p.get_last_seen_typing()))).collect();
         guard.clear();
-        for peer in peers {
+        for mut peer in peers {
             let uid = match peer.get_user_id() { Some(u) => u, None => continue };
             if Some(uid) == me { continue; }
             let key = peer.shrdkeygen(self.prvkey.clone());
-            let stream = match old.get(&peer.get_pubkey().to_bytes()) {
-                Some((old_addrs, s)) if *old_addrs == peer.get_addrs() => s.clone(),
-                _ => None, // new peer, or its address changed → force a fresh dial
+            let prev = old.get(&peer.get_pubkey().to_bytes());
+            let stream = match prev {
+                Some((old_addrs, s, _, _)) if *old_addrs == peer.get_addrs() => s.clone(),
+                _ => None,
             };
+            if let Some((_, _, hb, typ)) = prev { peer.set_last_heartbeat(*hb); peer.set_last_seen_typing(*typ); }
             guard.insert(uid, (peer, key, stream));
         }
         if let Some(my_id) = me {
             let me_pub = PublicKey::from(&self.prvkey);
-            // Reuse our existing addrs (refresh_addrs may have filled in the public IP) so a
-            // rebuild doesn't clobber it back to LAN. NB: can't call my_addrs() here — it locks
-            // peers, which we already hold → deadlock. Fall back to the bind socket.
-            let my_addrs = old.get(&me_pub.to_bytes()).map(|(a, _)| *a).unwrap_or_else(|| {
+            let my_addrs = old.get(&me_pub.to_bytes()).map(|(a, _, _, _)| *a).unwrap_or_else(|| {
                 let a = self.socket.lock().unwrap().0;
-                [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a, a]
+                [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a]
             });
             let me_peer = Peer {
                 id: -1, user_id: Some(my_id), addrs: my_addrs,
                 pubkey: me_pub, last_heartbeat: None, last_seen_typing: None
             };
             let me_key = me_peer.shrdkeygen(self.prvkey.clone());
-            guard.insert(my_id, (me_peer, me_key, old.get(&me_pub.to_bytes()).and_then(|(_, s)| s.clone())));
+            guard.insert(my_id, (me_peer, me_key, old.get(&me_pub.to_bytes()).and_then(|(_, s, _, _)| s.clone())));
         }
         Ok(())
     }
 
     /// A known peer re-announced (rejoin / IP change): refresh its address and drop the
     /// stale stream so `connect_peers` re-dials it.
-    pub async fn reconnect_peer(&self, pubkey: PublicKey, addrs: [SocketAddr; 3]) {
+    pub async fn reconnect_peer(&self, pubkey: PublicKey, addrs: [SocketAddr; 2]) {
         {
             let mut guard = self.peers.lock().unwrap();
             match guard.values_mut().find(|(p, _, _)| p.get_pubkey().as_bytes() == pubkey.as_bytes()) {
-                Some((p, _, s)) => { p.set_addrs(addrs); *s = None; }
+                Some((p, _, s)) => { p.set_addrs(addrs); p.set_last_heartbeat(None); p.set_last_seen_typing(None); *s = None; }
                 None => return,
             }
         }
         self.connect_peers().await;
+        self.broadcast_peer_table().await;
+    }
+
+    async fn broadcast_peer_table(&self) {
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let me_pub = PublicKey::from(&self.prvkey).to_bytes();
+        let mut table: Vec<([u8; 32], [SocketAddr; 2])> = self.peers.lock().unwrap().values()
+            .map(|(p, _, _)| (p.get_pubkey().to_bytes(), p.get_addrs()))
+            .filter(|(pk, _)| *pk != me_pub).collect();
+        table.push((me_pub, self.current_addrs()));
+        let targets: Vec<(Key, Arc<TokioMutex<TcpStream>>)> = self.peers.lock().unwrap().iter()
+            .filter(|(uid, _)| Some(**uid) != me)
+            .filter_map(|(_, (_, k, s))| s.as_ref().map(|arc| (*k, Arc::clone(arc)))).collect();
+        for (key, arc) in targets {
+            if let Ok(frame) = Connection::encode(&key, AVP_HD, &table) {
+                tokio::spawn(async move {
+                    let mut s = arc.lock().await;
+                    let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
+                    let _ = s.write_all(&frame).await;
+                });
+            }
+        }
     }
 
     /// Open an outbound stream (trying each peer's 3 addresses) to every peer that
     /// doesn't have one yet, so messages can actually flow after a sync.
     pub async fn connect_peers(&self) {
         let me = self.user.as_ref().map(|(id, _, _)| *id);
-        let to_dial: Vec<(u64, [SocketAddr; 3])> = {
+        let own = self.current_addrs();
+        let to_dial: Vec<(u64, [SocketAddr; 2])> = {
             self.peers.lock().unwrap().iter()
                 .filter(|(uid, (_, _, s))| Some(**uid) != me && s.is_none())
                 .map(|(uid, (p, _, _))| (*uid, p.get_addrs()))
                 .collect()
         };
+        let mut table: Vec<([u8; 32], [SocketAddr; 2])> = self.peers.lock().unwrap().iter()
+            .filter(|(uid, _)| Some(**uid) != me)
+            .map(|(_, (p, _, _))| (p.get_pubkey().to_bytes(), p.get_addrs())).collect();
+        table.push((PublicKey::from(&self.prvkey).to_bytes(), own));
         for (uid, addrs) in to_dial {
-            if let Some(stream) = connect_any(&addrs).await
-                && let Some(e) = self.peers.lock().unwrap().get_mut(&uid)
-                && e.2.is_none() {
-                    e.2 = Some(Arc::new(TokioMutex::new(stream)));
+            let dialable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| !own.contains(a)).collect();
+            if dialable.is_empty() { continue; }
+            if let Some(stream) = connect_any(&dialable).await {
+                let arc = Arc::new(TokioMutex::new(stream));
+                let key = {
+                    let mut guard = self.peers.lock().unwrap();
+                    match guard.get_mut(&uid) {
+                        Some(e) if e.2.is_none() => { e.2 = Some(Arc::clone(&arc)); Some(e.1) }
+                        _ => None,
+                    }
+                };
+                if let Some(key) = key {
+                    let mut s = arc.lock().await;
+                    for frame in [Connection::encode(&key, OWN_HD, own), Connection::encode(&key, AVP_HD, &table)].into_iter().flatten() {
+                        let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
+                        let _ = s.write_all(&frame).await;
+                    }
+                }
             }
         }
     }
@@ -428,7 +511,7 @@ impl Connection {
 impl Secrecy for Connection {
     fn encode<T: Serialize>(key: &Key, header: u8, plain: T) -> Result<Vec<u8>> {
         let mut packet: Vec<u8> = serde_json::to_vec(&plain)?;
-        if header == DBS_HD || header == NWP_HD || header == DBR_HD {
+        if header == DBS_HD || header == NWP_HD || header == DBR_HD || header == AVP_HD {
             packet = compress_prepend_size(&packet);
         }
         let mut plaintxt: Vec<u8> = Vec::with_capacity(1+packet.len());
@@ -457,7 +540,7 @@ impl Secrecy for Connection {
             return Err(anyhow::anyhow!("Decrypted frame missing header"));
         }
         let header = plaintxt.remove(0);
-        if header == DBS_HD || header == NWP_HD || header == DBR_HD {
+        if header == DBS_HD || header == NWP_HD || header == DBR_HD || header == AVP_HD {
             plaintxt = decompress_size_prepended(&plaintxt)
                 .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
         }
@@ -466,20 +549,71 @@ impl Secrecy for Connection {
 }
 
 impl RendezVous for Connection {
-    async fn rcv_requests(&self, requests: Requests, token: CancellationToken) -> Result<()> {
-        self.bind_rendezvous().await?;
-        let listener = self.rendezvous.1.lock().unwrap().clone();
+    async fn rcv_requests(&self, requests: Requests, token: CancellationToken, is_admin: bool) -> Result<()> {
+        if is_admin { loop {
+            if self.bind_rendezvous().await.is_ok() { break; }
+            let me = self.user.as_ref().map(|(id, _, _)| *id);
+            let keys: Vec<Key> = self.peers.lock().unwrap().iter()
+                .filter(|(uid, _)| Some(**uid) != me).map(|(_, (_, k, _))| *k).collect();
+            let s = UdpSocket::bind("0.0.0.0:0").await?;
+            for key in &keys {
+                if let Ok(f) = Connection::encode(key, EVI_HD, ()) { let _ = s.send_to(&f, self.rendezvous.0).await; }
+            }
+            tokio::select! {
+                _ = token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        } } else if self.bind_rendezvous().await.is_err() { return Ok(()); }
+        let sock = self.rendezvous.1.lock().unwrap().clone();
 
-        if let Some(listener) = listener {
+        if let Some(sock) = sock {
+            let mut buffer = vec![0u8; 4096];
             loop {
-                tokio::select! {
-                    _ = token.cancelled() => { break; }
-                    result = listener.accept() => {
-                        match result {
-                            Ok((mut stream, peer_addr)) => {
-                                let mut buffer = vec![0u8; 4096];
-                                match stream.read(&mut buffer).await {
-                                    Ok(n) if n > 0 => {
+                let (n, peer_addr) = tokio::select! {
+                    _ = token.cancelled() => break,
+                    r = sock.recv_from(&mut buffer) => match r { Ok(v) => v, Err(_) => continue },
+                };
+                if n == 0 { continue; }
+                let recovered = {
+                    let guard = self.peers.lock().unwrap();
+                    guard.values()
+                        .find_map(|(p, k, _)| Connection::decode(k, &buffer[..n]).ok().map(|(h, pl)| (p.get_pubkey(), *k, h, pl)))
+                };
+                if let Some((pubkey, key, header, pl)) = recovered {
+                    match header {
+                        OWN_HD => {
+                            if let Ok(addrs) = serde_json::from_slice::<[SocketAddr; 2]>(&pl) {
+                                self.reconnect_peer(pubkey, addrs).await;
+                            }
+                        }
+                        AVP_HD => {
+                            let me_pub = PublicKey::from(&self.prvkey).to_bytes();
+                            if let Ok(table) = serde_json::from_slice::<Vec<([u8; 32], [SocketAddr; 2])>>(&pl) {
+                                for (pk, addrs) in table {
+                                    if pk != me_pub { self.reconnect_peer(PublicKey::from(pk), addrs).await; }
+                                }
+                            }
+                            let mut reply: Vec<([u8; 32], [SocketAddr; 2])> = self.peers.lock().unwrap().values()
+                                .map(|(p, _, _)| (p.get_pubkey().to_bytes(), p.get_addrs()))
+                                .filter(|(pk, _)| *pk != me_pub).collect();
+                            reply.push((me_pub, self.current_addrs()));
+                            if let Ok(f) = Connection::encode(&key, AVP_HD, &reply) { let _ = sock.send_to(&f, peer_addr).await; }
+                        }
+                        EVI_HD => {
+                            *self.rendezvous.1.lock().unwrap() = None;
+                            if let Ok(f) = Connection::encode(&key, OWN_HD, self.current_addrs()) {
+                                let _ = sock.send_to(&f, peer_addr).await;
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if !is_admin { continue; }
+                {
+                    {
+                        {
                                         let payload = String::from_utf8_lossy(&buffer[..n]);
                                         let start = match payload.find('[') {
                                             Some(s) => s,
@@ -497,7 +631,6 @@ impl RendezVous for Connection {
                                             Some(p) => p,
                                             None => continue,
                                         };
-                                        // body = "{pubkey_hex};{uid}"
                                         let (pubkey_hex, uid_raw) = match body.split_once(';') {
                                             Some((pk, u)) => (pk, u.parse::<u32>().unwrap_or(0)),
                                             None => (body, 0),
@@ -514,12 +647,9 @@ impl RendezVous for Connection {
                                             Some(a) => a,
                                             None => continue,
                                         };
-                                        // Source IP = joiner's reachable (post-NAT) addr; pair with the
-                                        // announced port and make it primary (tried first, displayed).
-                                        let addrs = [SocketAddr::new(peer_addr.ip(), addrs[1].port()), addrs[1], addrs[2]];
+                                        let addrs = [SocketAddr::new(peer_addr.ip(), addrs[1].port()), addrs[1]];
                                         let my_pub = PublicKey::from(&self.prvkey);
-                                        if pubkey.as_bytes() == my_pub.as_bytes() { continue; } // our own echo
-                                        // Known peer re-announcing (rejoin / IP change): reconnect, don't re-queue.
+                                        if pubkey.as_bytes() == my_pub.as_bytes() { continue; }
                                         let known = self.peers.lock().unwrap().values()
                                             .any(|(p, _, _)| p.get_pubkey().as_bytes() == pubkey.as_bytes());
                                         if known {
@@ -527,7 +657,6 @@ impl RendezVous for Connection {
                                             continue;
                                         }
                                         {
-                                            // Dedup by pubkey: a resend updates the addresses instead of stacking.
                                             let mut guard = requests.lock().unwrap();
                                             if let Some(existing) = guard.iter_mut().find(|r| r.2.as_bytes() == pubkey.as_bytes()) {
                                                 existing.0 = addrs;
@@ -537,12 +666,7 @@ impl RendezVous for Connection {
                                         }
                                         let admin_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
                                         let reply = format!("received[({}, {})]{}fallegji", addr_str, name, admin_pubkey_hex);
-                                        let _ = stream.write_all(reply.as_bytes()).await;
-                                    }
-                                    _ => continue,
-                                }
-                            }
-                            Err(_) => continue,
+                                        let _ = sock.send_to(reply.as_bytes(), peer_addr).await;
                         }
                     }
                 }
@@ -556,13 +680,13 @@ impl RendezVous for Connection {
         let prvkey = self.prvkey.clone();
         let peers = Arc::clone(&self.peers);
         let admin_addr = self.rendezvous.0;
-        let my_addrs_str = self.current_addrs().await.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+        let my_addrs_str = self.current_addrs().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
 
-        let mut stream = TcpStream::connect(&admin_addr).await?;
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
         let my_pubkey_hex = hex::encode(PublicKey::from(&self.prvkey).as_bytes());
         let my_uid = self.user.as_ref().map(|(_, _, u)| u.as_raw()).unwrap_or(0);
         let request = format!("{}[{}]{};{}fallegji", name, my_addrs_str, my_pubkey_hex, my_uid);
-        stream.write_all(request.as_bytes()).await?;
+        sock.send_to(request.as_bytes(), admin_addr).await?;
         let timeout = tokio::time::Duration::from_secs(5);
         let start_time = tokio::time::Instant::now();
         let mut buffer = vec![0u8; 4096];
@@ -570,9 +694,9 @@ impl RendezVous for Connection {
             if start_time.elapsed() > timeout { return Ok(false); }
             match tokio::time::timeout(
                 tokio::time::Duration::from_millis(500),
-                stream.read(&mut buffer)
+                sock.recv_from(&mut buffer)
             ).await {
-                Ok(Ok(n)) if n > 0 => {
+                Ok(Ok((n, _src))) if n > 0 => {
                     let repl = String::from_utf8_lossy(&buffer[..n]);
                     let start = match repl.find('[') { Some(s) => s, None => continue };
                     let end = match repl.find(']') { Some(e) => e, None => continue };
@@ -598,7 +722,7 @@ impl RendezVous for Connection {
                             None => continue,
                         };
                         let admin_peer = Peer {
-                            id: -1, user_id: None, addrs: [admin_addr; 3], pubkey: admin_pubkey,
+                            id: -1, user_id: None, addrs: [admin_addr; 2], pubkey: admin_pubkey,
                             last_heartbeat: None, last_seen_typing: None
                         };
                         let key = admin_peer.shrdkeygen(prvkey.clone());
@@ -615,9 +739,9 @@ impl RendezVous for Connection {
     }
 
     async fn fallback_lookup(&self) -> Result<bool> {
-        match bind_listener(self.rendezvous.0) {
-            Ok(listener) => {
-                *self.rendezvous.1.lock().unwrap() = Some(Arc::new(listener));
+        match UdpSocket::bind(self.rendezvous.0).await {
+            Ok(sock) => {
+                *self.rendezvous.1.lock().unwrap() = Some(Arc::new(sock));
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(false),
@@ -625,8 +749,38 @@ impl RendezVous for Connection {
         }
     }
 
-    async fn fallback_send(&self, name: String) -> Result<bool> {
-        self.snd_requests(name).await
+    async fn fallback_send(&self, _name: String) -> Result<bool> {
+        let addrs = self.current_addrs();
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let mut table: Vec<([u8; 32], [SocketAddr; 2])> = self.peers.lock().unwrap().iter()
+            .filter(|(uid, _)| Some(**uid) != me)
+            .map(|(_, (p, _, _))| (p.get_pubkey().to_bytes(), p.get_addrs())).collect();
+        table.push((PublicKey::from(&self.prvkey).to_bytes(), addrs));
+        let keys: Vec<Key> = self.peers.lock().unwrap().iter()
+            .filter(|(uid, _)| Some(**uid) != me)
+            .map(|(_, (_, k, _))| *k).collect();
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        for key in &keys {
+            if let Ok(frame) = Connection::encode(key, OWN_HD, addrs) {
+                let _ = sock.send_to(&frame, self.rendezvous.0).await;
+            }
+            if let Ok(frame) = Connection::encode(key, AVP_HD, &table) {
+                let _ = sock.send_to(&frame, self.rendezvous.0).await;
+            }
+        }
+        let me_pub = PublicKey::from(&self.prvkey).to_bytes();
+        let mut buf = vec![0u8; 4096];
+        while let Ok(Ok((n, _))) = tokio::time::timeout(Duration::from_millis(800), sock.recv_from(&mut buf)).await {
+            let decoded = keys.iter().find_map(|k| Connection::decode(k, &buf[..n]).ok());
+            if let Some((AVP_HD, pl)) = decoded
+                && let Ok(reply) = serde_json::from_slice::<Vec<([u8; 32], [SocketAddr; 2])>>(&pl) {
+                for (pk, a) in reply {
+                    if pk != me_pub { self.reconnect_peer(PublicKey::from(pk), a).await; }
+                }
+                break;
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -638,11 +792,9 @@ impl Communication for Connection {
             let (mut stream, _) = tokio::select! {
                 _ = token.cancelled() => return Ok(()),
                 _ = cooldown.tick() => {
-                    // Buffered syncs waited out the 3s cooldown → collapse them (fallback for the
-                    // read_db_sync fast path when an online peer stays silent). Needs the chat.
                     let chat = slot.lock().unwrap().as_ref().map(|a| a.chat.clone());
                     if let Some(chat) = chat {
-                        let due = self.db_sync_buf.lock().unwrap().first_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(3));
+                        let due = self.db_sync_buf.lock().unwrap().first_at.is_some_and(|t| t.elapsed() >= SYNC_COOLDOWN);
                         if due { let _ = self.decide_sync(&chat).await; }
                     }
                     continue;
@@ -687,9 +839,32 @@ impl Communication for Connection {
                     let chat = slot.lock().unwrap().as_ref().map(|a| a.chat.clone());
                     let _ = match (header, chat) {
                         (NWP_HD, None) => me.accept_chat(&slot, payload).await,
+                        (OWN_HD, _) => {
+                            if let Ok(addrs) = serde_json::from_slice::<[SocketAddr; 2]>(&payload) && let Some(e) = me.peers.lock().unwrap().get_mut(&peer_id) { e.0.set_addrs(addrs); }
+                            Ok(())
+                        }
+                        (AVP_HD, _) => {
+                            if let Ok(table) = serde_json::from_slice::<Vec<([u8; 32], [SocketAddr; 2])>>(&payload) {
+                                let me_pub = PublicKey::from(&me.prvkey).to_bytes();
+                                {
+                                    let mut guard = me.peers.lock().unwrap();
+                                    for (pk, addrs) in table {
+                                        if pk != me_pub && let Some(e) = guard.values_mut().find(|(p, _, _)| p.get_pubkey().to_bytes() == pk) { e.0.set_addrs(addrs); }
+                                    }
+                                }
+                                me.connect_peers().await;
+                            }
+                            Ok(())
+                        }
                         (_, None) => Ok(()),
                         (MSG_HD, Some(chat)) => me.read_msg(&chat, payload).await,
-                        (HBT_HD, Some(chat)) => me.read_heartbeat(&chat, peer_id).await,
+                        (HBT_HD, Some(chat)) => {
+                            if let Ok(true) = me.read_heartbeat(&chat, peer_id).await {
+                                let (me2, db) = (Arc::clone(&me), chat.db.clone());
+                                tokio::spawn(async move { let _ = me2.send_db_sync(&db).await; });
+                            }
+                            Ok(())
+                        }
                         (TYP_HD, Some(_)) => me.read_typing(peer_id).await,
                         (DBS_HD, Some(chat)) => me.read_db_sync(&chat, peer_id, payload).await,
                         (DBR_HD, Some(chat)) => me.read_db_req(&chat, peer_id, payload).await,
@@ -704,7 +879,7 @@ impl Communication for Connection {
         }
     }
 
-    async fn send_newpeer(&self, addrs: [SocketAddr; 3], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()> {
+    async fn send_newpeer(&self, addrs: [SocketAddr; 2], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()> {
         let uid = Uid::from(uid);
         let pubkey_hex = hex::encode(pubkey.as_bytes());
         let mut joiner = User::new(pubkey_hex.clone(), name.to_string(), uid);
@@ -768,35 +943,47 @@ impl Communication for Connection {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
-        let targets: Vec<(Key, Arc<TokioMutex<TcpStream>>)> = {
+        let targets: Vec<(u64, Key, Arc<TokioMutex<TcpStream>>)> = {
             let me = self.user.as_ref().map(|(id, _, _)| *id);
             let guard = self.peers.lock().unwrap();
             guard.iter()
                 .filter(|(uid, _)| Some(**uid) != me)
-                .filter_map(|(_, (_, k, s))| s.as_ref().map(|arc| (*k, Arc::clone(arc))))
+                .filter_map(|(uid, (_, k, s))| s.as_ref().map(|arc| (*uid, *k, Arc::clone(arc))))
                 .collect()
         };
-        for (key, stream_arc) in targets {
+        for (uid, key, stream_arc) in targets {
             let frame = Connection::encode(&key, HBT_HD, ())?;
+            let peers = Arc::clone(&self.peers);
             tokio::spawn(async move {
                 let mut s = stream_arc.lock().await;
-                let _ = s.write_all(&(frame.len() as u32).to_be_bytes()).await;
-                let _ = s.write_all(&frame).await;
+                let ok = s.write_all(&(frame.len() as u32).to_be_bytes()).await.is_ok()
+                    && s.write_all(&frame).await.is_ok();
+                drop(s);
+                if !ok && let Some(e) = peers.lock().unwrap().get_mut(&uid)
+                    && e.2.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &stream_arc)) {
+                    e.2 = None;
+                    e.0.set_last_heartbeat(None);
+                    e.0.set_last_seen_typing(None);
+                }
             });
         }
         Ok(())
     }
-    async fn read_heartbeat(&self, chat: &Chat, peer_id: u64) -> Result<()> {
+    async fn read_heartbeat(&self, chat: &Chat, peer_id: u64) -> Result<bool> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_secs() as i64;
-        let db_id = {
+        let (db_id, came_online) = {
             let mut guard = self.peers.lock().unwrap();
-            guard.get_mut(&peer_id).map(|entry| {
-                entry.0.set_last_heartbeat(Some(now));
-                entry.0.get_id()
-            })
+            match guard.get_mut(&peer_id) {
+                Some(entry) => {
+                    let was_online = entry.0.is_online();
+                    entry.0.set_last_heartbeat(Some(now));
+                    (Some(entry.0.get_id()), !was_online)
+                }
+                None => (None, false),
+            }
         };
         if let Some(id) = db_id {
             let db = chat.db.clone();
@@ -804,7 +991,7 @@ impl Communication for Connection {
                 let _ = db.update_peer_last_heartbeat(id, Some(now)).await;
             });
         }
-        Ok(())
+        Ok(came_online)
     }
 
     async fn send_typing(&self) -> Result<()> {
@@ -832,24 +1019,20 @@ impl Communication for Connection {
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
-                .as_secs() as i64;
+                .as_millis() as i64;
             peer.set_last_seen_typing(Some(timestamp));
         }
         Ok(())
     }
 
     async fn send_db_sync(&self, db: &Database) -> Result<()> {
-        // Send three separately-zipped components — messages, users, peers, in that order —
-        // length-framed as [u32 len][zip]×3. Each is serialized from canonical (sorted) rows
-        // stripped of volatile/local fields (autoincrement id, heartbeat) so identical logical
-        // state produces identical bytes — the buffer/decider votes on these.
         let mut msgs: Vec<(u64, i64, String)> = db.load_all_messages().await?
             .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
         msgs.sort_by_key(|a| (a.1, a.0));
         let mut usrs: Vec<(u64, String, Option<String>, u32)> = db.load_all_users().await?
             .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
         usrs.sort_by_key(|u| u.0);
-        let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = db.load_all_peers().await?
+        let mut pirs: Vec<(Option<u64>, [String; 2], [u8; 32])> = db.load_all_peers().await?
             .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
         pirs.sort_by_key(|a| a.0);
 
@@ -881,9 +1064,6 @@ impl Communication for Connection {
         }
         Ok(())
     }
-    /// Classifier: split the length-framed [u32 len][zip]×3 (messages, users, peers) and stash
-    /// each zip into `db_sync_buf`, tagging the admin's entry via `admin_rank`. The bg decider
-    /// collapses the buffer later (admin-authoritative roster, union messages).
     async fn read_db_sync(&self, chat: &Chat, peer_id: u64, payload: Vec<u8>) -> Result<()> {
         let framed: Vec<u8> = serde_json::from_slice(&payload)?;
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(3);
@@ -896,32 +1076,45 @@ impl Communication for Connection {
             blobs.push(framed[i..i + len].to_vec());
             i += len;
         }
+        let msg_rows: Vec<(u64, i64, String)> =
+            serde_json::from_slice(&decompress_size_prepended(&blobs[0]).map_err(|e| anyhow::anyhow!("{e}"))?)?;
+        if !msg_rows.is_empty() {
+            let incoming: Vec<Message> = msg_rows.iter().map(|(sid, ts, c)| {
+                let mut m = Message::new(-1, *sid, c.clone()); m.set_date(*ts); m
+            }).collect();
+            chat.db.save_all_messages(incoming).await?;
+            let reloaded = chat.db.load_all_messages().await?;
+            let mut hist = chat.message_history.write().unwrap();
+            let mut have: std::collections::HashSet<(u64, i64, String)> = hist.iter()
+                .map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+            for m in reloaded {
+                if have.insert((m.get_sender_id(), m.get_sent_at(), m.get_contents())) { hist.push(m); }
+            }
+            hist.sort_by_key(|m| (m.get_sent_at(), m.get_sender_id()));
+        }
+
         let online = {
             let me = self.user.as_ref().map(|(id, _, _)| *id);
             self.peers.lock().unwrap().iter()
                 .filter(|(uid, (p, _, _))| Some(**uid) != me && p.is_online()).count()
         };
+        let from_admin = Some(peer_id) == chat.get_admin();
         let trigger = {
             let mut it = blobs.into_iter();
             let mut buf = self.db_sync_buf.lock().unwrap();
-            let idx = buf.msgs.len() as u8; // this sender's slot across the three parallel lists
+            let idx = buf.msgs.len() as u8;
             buf.msgs.push_back(it.next().unwrap());
             buf.usrs.push_back(it.next().unwrap());
             buf.pirs.push_back(it.next().unwrap());
-            if buf.rcv_count == 0 { buf.first_at = Some(Instant::now()); } // start the cooldown
+            if buf.rcv_count == 0 { buf.first_at = Some(Instant::now()); }
             buf.rcv_count += 1;
-            if Some(peer_id) == chat.get_admin() { buf.admin_rank = Some(idx); }
-            // Fast path: heard from every known-online peer. (online == 0 waits for the cooldown
-            // instead, so a node with no heartbeats yet doesn't decide on a single early sync.)
-            online > 0 && buf.rcv_count as usize >= online
+            if from_admin { buf.admin_rank = Some(idx); }
+            from_admin || (online > 0 && buf.rcv_count as usize >= online)
         };
         if trigger { self.decide_sync(chat).await?; }
         Ok(())
     }
 
-    /// Collapse the buffered syncs into the db. Roster (users+peers): the admin's copy if we
-    /// got one, else the most common version (our own included). Messages: always the union of
-    /// everyone's (new ones never dropped), deduped by identity. Persisted via save_all_*.
     async fn decide_sync(&self, chat: &Chat) -> Result<()> {
         let (msg_blobs, usr_blobs, pir_blobs, admin_rank) = {
             let mut buf = self.db_sync_buf.lock().unwrap();
@@ -936,18 +1129,20 @@ impl Communication for Connection {
         };
         if usr_blobs.is_empty() { return Ok(()); }
 
-        // Our own current state (serialized exactly like send_db_sync) is a vote too.
         let mut my_u: Vec<(u64, String, Option<String>, u32)> = chat.db.load_all_users().await?
             .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
         my_u.sort_by_key(|u| u.0);
         let my_usrs = compress_prepend_size(&serde_json::to_vec(&my_u)?);
-        let mut my_p: Vec<(Option<u64>, [String; 3], [u8; 32])> = chat.db.load_all_peers().await?
-            .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
+        let live: HashMap<u64, [SocketAddr; 2]> = self.peers.lock().unwrap().iter()
+            .map(|(uid, (p, _, _))| (*uid, p.get_addrs())).collect();
+        let mut my_p: Vec<(Option<u64>, [String; 2], [u8; 32])> = chat.db.load_all_peers().await?
+            .iter().map(|p| {
+                let addrs = p.get_user_id().and_then(|u| live.get(&u)).copied().unwrap_or_else(|| p.get_addrs());
+                (p.get_user_id(), addrs.map(|a| a.to_string()), p.get_pubkey().to_bytes())
+            }).collect();
         my_p.sort_by_key(|a| a.0);
         let my_pirs = compress_prepend_size(&serde_json::to_vec(&my_p)?);
 
-        // Roster winner: the admin's copy (a received one, or ours if we *are* the admin),
-        // else the most frequent version with ours counted in.
         let i_am_admin = chat.get_admin() == self.user.as_ref().map(|(id, _, _)| *id);
         let winner = |blobs: &[Vec<u8>], mine: &Vec<u8>| -> Vec<u8> {
             if let Some(i) = admin_rank && (i as usize) < blobs.len() {
@@ -962,10 +1157,9 @@ impl Communication for Connection {
         let chosen_pirs = winner(&pir_blobs, &my_pirs);
         let urows: Vec<(u64, String, Option<String>, u32)> =
             serde_json::from_slice(&decompress_size_prepended(&chosen_usrs).map_err(|e| anyhow::anyhow!("{e}"))?)?;
-        let prows: Vec<(Option<u64>, [String; 3], [u8; 32])> =
+        let prows: Vec<(Option<u64>, [String; 2], [u8; 32])> =
             serde_json::from_slice(&decompress_size_prepended(&chosen_pirs).map_err(|e| anyhow::anyhow!("{e}"))?)?;
 
-        // Messages: union all buffered + ours, deduped by identity.
         let mut my_m: Vec<(u64, i64, String)> = chat.db.load_all_messages().await?
             .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
         my_m.sort_by_key(|a| (a.1, a.0));
@@ -982,32 +1176,57 @@ impl Communication for Connection {
                 }
             }
         }
+        for m in chat.message_history.read().unwrap().iter() {
+            if seen.insert((m.get_sender_id(), m.get_sent_at(), m.get_contents())) {
+                let mut nm = Message::new(-1, m.get_sender_id(), m.get_contents());
+                nm.set_date(m.get_sent_at());
+                messages.push(nm);
+            }
+        }
 
-        // Rebuild via existing constructors: peers carry the pubkey, users re-derive their id
-        // from it (User::new), so the synced ids match. Persist with save_all_*.
+        let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let current: HashMap<u64, ([SocketAddr; 2], bool)> = self.peers.lock().unwrap().iter()
+            .map(|(uid, (p, _, s))| (*uid, (p.get_addrs(), s.is_some()))).collect();
         let mut keys: HashMap<u64, [u8; 32]> = HashMap::new();
         let mut peers = Vec::new();
         for (user_id, addrs, pk) in prows {
-            if let (Some(uid), Some(a)) = (user_id, Peer::parse_addrs(&addrs.join(","))) {
+            let pick = |uid: u64| {
+                let cur = current.get(&uid);
+                let keep_current = Some(uid) == me || cur.map(|(_, online)| *online).unwrap_or(false);
+                if keep_current {
+                    cur.map(|(a, _)| *a).or_else(|| Peer::parse_addrs(&addrs.join(",")))
+                } else {
+                    Peer::parse_addrs(&addrs.join(",")).or_else(|| cur.map(|(a, _)| *a))
+                }
+            };
+            if let Some(uid) = user_id && let Some(a) = pick(uid) {
                 keys.insert(uid, pk);
                 peers.push(Peer { id: -1, user_id, addrs: a, pubkey: PublicKey::from(pk), last_heartbeat: None, last_seen_typing: None });
             }
         }
         let mut users = Vec::new();
         for (id, name, role, uid) in urows {
-            let Some(pk) = keys.get(&id) else { continue }; // a user with no peer in the chosen set
+            let Some(pk) = keys.get(&id) else { continue };
             let mut u = User::new(hex::encode(pk), name, Uid::from(uid));
             if let Some(r) = role.and_then(|r| r.parse().ok()) { u.set_role(r); }
             users.push(u);
         }
-        users.push(User::sys()); // keep sys (id 0); load omits it but system messages reference it
+        users.push(User::sys());
         let gained_msgs = messages.len() > my_m.len();
         chat.db.save_all_users(users).await?;
         chat.db.save_all_peers(peers).await?;
         chat.db.save_all_messages(messages).await?;
 
-        // Refresh the in-memory views from the db.
-        *chat.message_history.write().unwrap() = chat.db.load_all_messages().await?;
+        {
+            let reloaded = chat.db.load_all_messages().await?;
+            let mut hist = chat.message_history.write().unwrap();
+            let mut have: std::collections::HashSet<(u64, i64, String)> = hist.iter()
+                .map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
+            for m in reloaded {
+                if have.insert((m.get_sender_id(), m.get_sent_at(), m.get_contents())) { hist.push(m); }
+            }
+            hist.sort_by_key(|m| (m.get_sent_at(), m.get_sender_id()));
+        }
         let users_now = chat.db.load_all_users().await?;
         {
             let mut members = chat.members.write().unwrap();
@@ -1017,8 +1236,6 @@ impl Communication for Connection {
         }
         self.rebuild_peermap(&chat.db).await?;
         self.connect_peers().await;
-        // Gossip the decided state onward, but only if it changed ours — so convergence
-        // terminates (once everyone agrees, nobody re-broadcasts). Messages stay additive.
         if chosen_usrs != my_usrs || chosen_pirs != my_pirs || gained_msgs {
             let _ = self.send_db_sync(&chat.db).await;
         }
@@ -1039,7 +1256,6 @@ impl Communication for Connection {
         };
 
         if let Some((key, stream_arc)) = target {
-            // Just a request header — the reply (read_db_req) carries the sync, not us.
             let frame = Connection::encode(&key, DBR_HD, Vec::<u8>::new())?;
             tokio::spawn(async move {
                 let mut s = stream_arc.lock().await;
@@ -1050,14 +1266,13 @@ impl Communication for Connection {
         Ok(())
     }
     async fn read_db_req(&self, chat: &Chat, peer_id: u64, _payload: Vec<u8>) -> Result<()> {
-        // Reply with our sync (3 zipped components, length-framed) to the requester only.
         let mut msgs: Vec<(u64, i64, String)> = chat.db.load_all_messages().await?
             .iter().map(|m| (m.get_sender_id(), m.get_sent_at(), m.get_contents())).collect();
         msgs.sort_by_key(|a| (a.1, a.0));
         let mut usrs: Vec<(u64, String, Option<String>, u32)> = chat.db.load_all_users().await?
             .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
         usrs.sort_by_key(|u| u.0);
-        let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = chat.db.load_all_peers().await?
+        let mut pirs: Vec<(Option<u64>, [String; 2], [u8; 32])> = chat.db.load_all_peers().await?
             .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
         pirs.sort_by_key(|a| a.0);
         let mut bytes = Vec::new();
@@ -1114,32 +1329,28 @@ impl Communication for Connection {
 
 //TODO: put these functions in some connection impl
 
-/// This machine's three candidate addresses for `port`: loopback, LAN (UDP trick),
-/// and public (defaults to LAN until STUN refines it — see `public_addr`).
-pub fn local_addrs(port: u16) -> Result<[SocketAddr; 3]> {
-    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-    let lan_ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
-    let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let lan = SocketAddr::new(lan_ip, port);
-    Ok([localhost, lan, lan])
+/// Fill `out` with every up non-loopback IPv4 interface as (name, ip) — feeds the home-screen
+/// interface picker. Cross-platform via if-addrs (getifaddrs on Unix, GetAdaptersAddresses on
+/// Windows); the UDP trick can only ever report one (the default-route) address.
+pub fn interfaces(out: &Arc<Mutex<Vec<(String, IpAddr)>>>) {
+    let found = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| i.ip().is_ipv4() && !i.is_loopback())
+        .map(|i| (i.name.clone(), i.ip()))
+        .collect();
+    *out.lock().unwrap() = found;
 }
 
-/// Discover our public (post-NAT) IP via the OpenDNS trick
-pub async fn public_ip() -> Result<IpAddr> {
-    let sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-    sock.connect("208.67.222.222:53").await?;
-    let q: &[u8] = &[
-        0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
-        4, b'm', b'y', b'i', b'p', 7, b'o', b'p', b'e', b'n', b'd', b'n', b's', 3, b'c', b'o', b'm', 0,
-        0, 1, 0, 1,
-    ];
-    tokio::time::timeout(Duration::from_secs(2), sock.send(q)).await??;
-    let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(Duration::from_secs(2), sock.recv(&mut buf)).await??;
-    if n < 4 { return Err(anyhow::anyhow!("short DNS reply")); }
-    Ok(IpAddr::V4(Ipv4Addr::new(buf[n - 4], buf[n - 3], buf[n - 2], buf[n - 1])))
+/// This machine's three candidate addresses for `port`: loopback, LAN (UDP trick),
+/// and public (defaults to LAN until STUN refines it — see `public_addr`).
+pub fn local_addrs(port: u16) -> Result<[SocketAddr; 2]> {
+    let lan_ip = bind_ip(None).context("no usable network interface")?;
+    let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let lan = SocketAddr::new(lan_ip, port);
+    Ok([localhost, lan])
 }
+
 
 /// Race all candidate addresses concurrently, returning the first that connects.
 pub async fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
@@ -1166,26 +1377,27 @@ pub fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
-pub async fn get_free_port() -> Result<(SocketAddr, TcpListener)> {
-    let tmpsock = UdpSocket::bind("0.0.0.0:0").context("UDP trick failed")?;
-    tmpsock.connect("8.8.8.8:80").context("UDP trick failed")?;
-    let ip = tmpsock.local_addr().context("UDP trick failed")?.ip();
+/// Bind IP for the chosen interface `iface` (by name), else the first up non-loopback IPv4.
+/// if-addrs based — replaces the old UDP trick, which only ever saw the default-route interface.
+pub fn bind_ip(iface: Option<&str>) -> Option<IpAddr> {
+    let addrs = if_addrs::get_if_addrs().ok()?;
+    if let Some(name) = iface &&
+        let Some(i) = addrs.iter().find(|i| i.name == name && i.ip().is_ipv4()) {
+        return Some(i.ip());
+    }
+    addrs.into_iter().find(|i| i.ip().is_ipv4() && !i.is_loopback()).map(|i| i.ip())
+}
 
+pub async fn get_free_port(iface: Option<&str>) -> Result<(SocketAddr, TcpListener)> {
+    let ip = bind_ip(iface).context("no usable network interface")?;
     let mut port = 1952;
-    let max = 74;
-
-    for _ in 0..max {
+    for _ in 0..74 {
         let addr = SocketAddr::new(ip, port);
-
         match bind_listener(addr) {
             Ok(sock) => return Ok((addr, sock)),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                port += 1;
-                continue;
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => { port += 1; continue; }
             Err(e) => return Err(e.into()),
         }
     }
-
     Err(anyhow::anyhow!("Too many ports in use"))
 }

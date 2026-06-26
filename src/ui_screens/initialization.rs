@@ -414,17 +414,26 @@ macro_rules! initMember {
                 .style(Style::default().fg($config.border_color).bg($config.bg_color))
                 .title(Line::from($rendezvous_input.clone()).alignment(Alignment::Center));
 
-            let addr_strs: [String; 3] = match $my_addrs {
-                Some(a) => [a[0].to_string(), a[1].to_string(), a[2].to_string()],
-                None => [String::new(), "resolving…".to_string(), String::new()],
+            let addr_strs: [String; 2] = match $my_addrs {
+                Some(a) => [a[0].to_string(), a[1].to_string()],
+                None => ["resolving…".to_string(), String::new()],
             };
             let addrs = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
+                .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
                 .split(chunks[2]);
 
-            // border color while on cooldown, accent when ready to resend.
-            let button_color = if std::time::Instant::now() < $resend_at { $config.border_color } else { $config.my_color };
+            // Red if no one acknowledged the join yet (no holder at the rendezvous — snd_requests
+            // inserts the admin as peer 0 only on ack); else border while on cooldown, accent when
+            // ready to resend.
+            let acked = $conn.peer_list().iter().any(|(id, _)| *id == 0);
+            let button_color = if !acked {
+                ratatui::style::Color::Red
+            } else if std::time::Instant::now() < $resend_at {
+                $config.border_color
+            } else {
+                $config.my_color
+            };
             let button_txt   = "Resend";
             let button = Paragraph::new(button_txt)
                 .centered()

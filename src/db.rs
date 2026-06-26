@@ -12,6 +12,7 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[allow(unused)]
 impl Database {
     /// Database initialization
     /// Exceptionally sync, not async
@@ -99,7 +100,7 @@ impl Database {
         }). await?
     }
     /// Insert a peer with an already-known keypair (vs `create_peer` which generates one).
-    pub async fn create_peer_with(&self, pubkey: PublicKey, addrs: [SocketAddr; 3], user_id: u64) -> Result<i32> {
+    pub async fn create_peer_with(&self, pubkey: PublicKey, addrs: [SocketAddr; 2], user_id: u64) -> Result<i32> {
         let conn = Arc::clone(&self.conn);
         let addr_str = addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
         task::spawn_blocking(move || {
@@ -327,7 +328,7 @@ impl Database {
         }).await?
     }
     /// Update a peer's 3 addresses (stored comma-joined in the `addr` column).
-    pub async fn update_peer_addrs(&self, id: i32, addrs: [SocketAddr; 3]) -> Result<bool> {
+    pub async fn update_peer_addrs(&self, id: i32, addrs: [SocketAddr; 2]) -> Result<bool> {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let addr_str = addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
@@ -689,66 +690,28 @@ impl Database {
         let conn = Arc::clone(&self.conn);
         task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            // Messages may have orphan senders (a kicked user, kept + rendered [REDACTED]); FK is
-            // on, so disable it here or those inserts fail and abort the whole rebuild mid-way.
+            // Messages are ADDITIVE — never deleted (a kicked user's are kept + rendered
+            // [REDACTED]). So this is insert-only by identity (sender, sent_at, contents): we never
+            // delete, which avoids racing a concurrent live create_message and dropping it (the
+            // "not all messages sync" bug). FK off because orphan senders are allowed.
             conn.execute("PRAGMA foreign_keys = OFF", [])?;
-
-            // Get existing message IDs
-            let mut stmt = conn.prepare("SELECT id FROM messages")?;
-            let existing_ids: HashSet<i32> = stmt
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()?;
-
-            // Build set of new message IDs (excluding invalid ones)
-            let new_ids: HashSet<i32> = messages.iter()
-                .map(|m| m.get_id())
-                .filter(|&id| id >= 0)
-                .collect();
-
-            // Update existing messages first
             for message in &messages {
-                let id = message.get_id();
-                if id >= 0 && existing_ids.contains(&id) {
-                    // Update existing
-                    conn.execute(
-                        "UPDATE messages SET sender_id = ?1, contents = ?2, sent_at = ?3 WHERE id = ?4",
-                        params![
-                            message.get_sender_id().to_string(),
-                            message.get_contents(),
-                            message.get_sent_at(),
-                            id
-                        ],
-                    )?;
-                }
-            }
-
-            // Delete messages not in new set
-            for old_id in existing_ids.difference(&new_ids) {
-                conn.execute("DELETE FROM messages WHERE id = ?1", params![old_id])?;
-            }
-
-            // Insert new messages (let database auto-generate IDs for invalid ones)
-            for message in &messages {
-                let id = message.get_id();
-                if id < 0 || !existing_ids.contains(&id) {
-                    // Insert new (omit id to let database auto-generate)
+                let exists: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE sender_id = ?1 AND sent_at = ?2 AND contents = ?3",
+                    params![message.get_sender_id().to_string(), message.get_sent_at(), message.get_contents()],
+                    |row| row.get(0),
+                )?;
+                if exists == 0 {
                     conn.execute(
                         "INSERT INTO messages (sender_id, contents, sent_at) VALUES (?1, ?2, ?3)",
-                        params![
-                            message.get_sender_id().to_string(),
-                            message.get_contents(),
-                            message.get_sent_at()
-                        ],
+                        params![message.get_sender_id().to_string(), message.get_contents(), message.get_sent_at()],
                     )?;
                 }
             }
-
             conn.execute("PRAGMA foreign_keys = ON", [])?;
 
-            // Count total messages in DB
             let mut count_stmt = conn.prepare("SELECT COUNT(*) FROM messages")?;
             let count = count_stmt.query_row([], |row| row.get::<_, u32>(0))?;
-
             Ok(count as usize)
         }).await?
     }

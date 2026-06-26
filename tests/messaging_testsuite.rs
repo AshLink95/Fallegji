@@ -10,6 +10,16 @@ use hex::ToHex;
 use x25519_dalek::PublicKey;
 use anyhow::Result;
 
+/// RAII auto-cleanup for file-backed test dbs — removes them on Drop, so a panicking test can't
+/// leave stale dbs that contaminate the next run.
+struct DbGuard(Vec<String>);
+impl DbGuard {
+    fn new<const N: usize>(files: [&str; N]) -> Self { Self(files.iter().map(|s| s.to_string()).collect()) }
+}
+impl Drop for DbGuard {
+    fn drop(&mut self) { for f in &self.0 { let _ = std::fs::remove_file(f); } }
+}
+
 /// In-memory Chat with a linked admin user + sys, for the logic-only tests.
 async fn mem_chat() -> Result<(Chat, u64)> {
     let db = Database::new(":memory:")?;
@@ -42,7 +52,7 @@ async fn bare_conn() -> Result<Connection> {
     let rendez = l.local_addr()?;
     drop(l);
     let (_, prvkey) = Peer::keypairgen()?;
-    Ok(Connection::new(prvkey, rendez, get_free_port().await?, HashMap::new()).await)
+    Ok(Connection::new(prvkey, rendez, get_free_port(None).await?, HashMap::new()).await)
 }
 
 /// Message: construction, getters, setters, serde roundtrip.
@@ -54,8 +64,6 @@ fn test_message() {
     assert_eq!(m.get_contents(), "hi");
     assert!(m.get_sent_at() > 0, "new() stamps a real time");
 
-    m.set_contents("yo".to_string());
-    assert_eq!(m.get_contents(), "yo");
     m.set_date(12345);
     assert_eq!(m.get_sent_at(), 12345);
 
@@ -127,7 +135,7 @@ async fn test_kick() -> Result<()> {
 #[tokio::test]
 async fn test_chat_new_and_old() -> Result<()> {
     let path = "u__msgtest.db";
-    let _ = std::fs::remove_file(path);
+    let _db = DbGuard::new([path]);
 
     let (chat, prvkey, _pub, user_id, _peer_id, peermap) = Chat::new("msgtest", "u", 9000).await?;
     {
@@ -145,8 +153,6 @@ async fn test_chat_new_and_old() -> Result<()> {
     assert!(old.members.read().unwrap().contains_key(&user_id), "members reloaded");
     assert!(old.message_history.read().unwrap().iter().any(|m| m.get_contents().contains("created by")), "history reloaded");
     drop(old);
-
-    let _ = std::fs::remove_file(path);
     Ok(())
 }
 
@@ -155,8 +161,7 @@ async fn test_chat_new_and_old() -> Result<()> {
 #[tokio::test]
 async fn test_chat_join() -> Result<()> {
     let (admin_db, join_db) = ("a__jointest.db", "b__jointest.db");
-    let _ = std::fs::remove_file(admin_db);
-    let _ = std::fs::remove_file(join_db);
+    let _db = DbGuard::new([admin_db, join_db]);
 
     let (admin, _prv, _pub, admin_id, _pid, _pm) = Chat::new("jointest", "a", 9000).await?;
     let snapshot = admin.db.dump().await?;
@@ -171,9 +176,6 @@ async fn test_chat_join() -> Result<()> {
     assert!(chat.members.read().unwrap().values().any(|u| u.get_name() == "b"), "registered itself");
     assert!(chat.message_history.read().unwrap().iter().any(|m| m.get_contents().contains("created by")), "adopted the admin's history");
     drop(chat);
-
-    let _ = std::fs::remove_file(admin_db);
-    let _ = std::fs::remove_file(join_db);
     Ok(())
 }
 
@@ -191,6 +193,10 @@ async fn test_chat_join() -> Result<()> {
 // ----------------------------------------------------------------------------
 
 struct Node { conn: Connection, chat: Chat, user_id: u64, pubkey: PublicKey, name: String, uid: Uid, addr: SocketAddr, db_path: String }
+// Auto-clean each node's file-backed db on drop (panic-safe).
+impl Drop for Node {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.db_path); }
+}
 
 /// Throwaway localhost listener (Connection::new needs one; we never accept on it).
 async fn bind_local() -> Result<(SocketAddr, TcpListener)> {
@@ -227,7 +233,7 @@ async fn join(admin: &Node, name: &str, room: &str) -> Result<Node> {
 async fn learn(admin: &Node, m: &Node) -> Result<()> {
     let key = m.pubkey.to_bytes().encode_hex::<String>();
     admin.chat.db.create_user(key.clone(), m.name.clone(), m.uid).await?;
-    admin.chat.db.create_peer_with(m.pubkey, [m.addr; 3], m.user_id).await?;
+    admin.chat.db.create_peer_with(m.pubkey, [m.addr; 2], m.user_id).await?;
     admin.chat.members.write().unwrap().insert(m.user_id, User::new(key, m.name.clone(), m.uid));
     Ok(())
 }
@@ -248,7 +254,7 @@ async fn sync_payload(db: &Database) -> Result<Vec<u8>> {
     let mut usrs: Vec<(u64, String, Option<String>, u32)> = db.load_all_users().await?
         .iter().map(|u| (u.get_id(), u.get_name(), u.get_role().map(|r| r.to_string()), u.get_uid().as_raw())).collect();
     usrs.sort_by_key(|u| u.0);
-    let mut pirs: Vec<(Option<u64>, [String; 3], [u8; 32])> = db.load_all_peers().await?
+    let mut pirs: Vec<(Option<u64>, [String; 2], [u8; 32])> = db.load_all_peers().await?
         .iter().map(|p| (p.get_user_id(), p.get_addrs().map(|a| a.to_string()), p.get_pubkey().to_bytes())).collect();
     pirs.sort_by_key(|a| a.0);
     let mut framed = Vec::new();
@@ -311,6 +317,30 @@ async fn test_decide_sync() -> Result<()> {
     let bm = msg_set(&bob.chat.db).await?;
     for c in ["a1", "b1", "c1"] { assert!(bm.iter().any(|(_, x, _)| x == c), "bob missing {c} (additive)"); }
 
-    for n in [&alice, &bob, &carol] { let _ = std::fs::remove_file(&n.db_path); }
+    Ok(())
+}
+
+/// A live message present only in the in-memory history (read_msg pushed it; its async db write
+/// hasn't landed) must survive a decide_sync, which reloads history from the db. Regression for
+/// "history not always loading" — the decider folds in-memory history into the union.
+#[tokio::test]
+async fn test_decide_keeps_inmemory_message() -> Result<()> {
+    let room = "memsync";
+    let alice = admin("alice", room).await?;
+    let bob = join(&alice, "bob", room).await?;
+    learn(&alice, &bob).await?;
+
+    let mut m = Message::new(-1, alice.user_id, "in-memory only".to_string());
+    m.set_date(123_456_789);
+    alice.chat.message_history.write().unwrap().push(m); // NOT in the db
+
+    let pb = sync_payload(&bob.chat.db).await?;
+    alice.conn.read_db_sync(&alice.chat, bob.user_id, pb).await?;
+    alice.conn.decide_sync(&alice.chat).await?;
+
+    assert!(alice.chat.message_history.read().unwrap().iter().any(|m| m.get_contents() == "in-memory only"),
+        "decider kept the in-memory-only message");
+    assert!(msg_set(&alice.chat.db).await?.iter().any(|(_, c, _)| c == "in-memory only"),
+        "and persisted it");
     Ok(())
 }
