@@ -19,10 +19,10 @@ macro_rules! home {
         let user_name_valid = !$user_name_input.is_empty();
         let rendezvous_valid = !$rendezvous_input.is_empty() &&
             $rendezvous_input.parse::<std::net::SocketAddr>().is_ok();
-        let is_red = match $config.my_color {
-            Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => true,
-            _ => false,
-        };
+        let warn_color = $config.warn_color();
+        // Names hit their cap → render that field red.
+        let chat_name_maxed = $chat_name_input.chars().count() >= $crate::messaging::MAX_NAME_LEN;
+        let user_name_maxed = $user_name_input.chars().count() >= $crate::messaging::MAX_NAME_LEN;
 
         $terminal.draw(|frame| {
             let size = frame.area();
@@ -125,13 +125,7 @@ macro_rules! home {
                 $config.my_color
             } else {
                 $anim_tick = $anim_tick.wrapping_add(1);
-                if ($anim_tick/3) % 2 == 0 { $config.my_color } else {
-                    if !is_red {
-                        Color::Red
-                    } else {
-                        Color::Rgb(255, 100, 0)
-                    }
-                }
+                if ($anim_tick/3) % 2 == 0 { $config.my_color } else { warn_color }
             };
             let hop_line = Line::from(vec![
                 Span::styled("< ", Style::default().fg(arrow_color)),
@@ -170,13 +164,7 @@ macro_rules! home {
             frame.render_widget(create_header, lines_layout[7]);
 
             // Chat name field
-            let chat_name_color = if chat_name_valid {
-                $config.my_color
-            } else if !is_red {
-                Color::Red
-            } else {
-                Color::Rgb(255, 100, 0)
-            };
+            let chat_name_color = if chat_name_valid && !chat_name_maxed { $config.my_color } else { warn_color };
             let chat_name_active = create_active && $active_field == 0;
             let chat_name_label_color = if chat_name_active { $config.text_color } else { $config.border_color };
 
@@ -194,13 +182,7 @@ macro_rules! home {
             frame.render_widget(chat_name_paragraph, lines_layout[8]);
 
             // User name field
-            let user_name_color = if !combo_exists {
-                $config.my_color
-            } else if !is_red {
-                Color::Red
-            } else {
-                Color::Rgb(255, 100, 0)
-            };
+            let user_name_color = if !combo_exists && !user_name_maxed { $config.my_color } else { warn_color };
             let user_name_active = create_active && $active_field == 1;
             let user_name_label_color = if user_name_active { $config.text_color } else { $config.border_color };
 
@@ -218,13 +200,7 @@ macro_rules! home {
             frame.render_widget(user_name_paragraph, lines_layout[9]);
 
             // Rendezvous address field
-            let rendezvous_color = if rendezvous_valid {
-                $config.my_color
-            } else if !is_red {
-                Color::Red
-            } else {
-                Color::Rgb(255, 100, 0)
-            };
+            let rendezvous_color = if rendezvous_valid { $config.my_color } else { warn_color };
             let rendezvous_active = create_active && $active_field == 2;
             let rendezvous_label_color = if rendezvous_active { $config.text_color } else { $config.border_color };
 
@@ -465,15 +441,15 @@ macro_rules! home {
                         }
                         KeyCode::Char(c) if $active_section == 1 => {
                             match $active_field {
-                                0 => $chat_name_input.push(c),
-                                1 => $user_name_input.push(c),
+                                0 => if !chat_name_maxed { $chat_name_input.push(c) }, // cap name length
+                                1 => if !user_name_maxed { $user_name_input.push(c) },
                                 2 => $rendezvous_input.push(c),
                                 _ => {}
                             }
                         }
                         KeyCode::Char(c) if $active_section == 2 => {
                             match $active_field {
-                                0 => $user_name_input.push(c),
+                                0 => if !user_name_maxed { $user_name_input.push(c) },
                                 1 => $rendezvous_input.push(c),
                                 _ => {}
                             }

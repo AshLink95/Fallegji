@@ -11,7 +11,6 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 <!-- Connection Types (P2P and group chats) -->
 
 # General checklist
-- [ ] Impose name (user and chat) size limit along with msg size
 - [ ] Elegant error handling. Show red text instead of exisiting the app (ranonce doesn't always reset when back in home.rs)
 - [ ] auto rename when new user shares an existing user's name
 - [ ] send notifications

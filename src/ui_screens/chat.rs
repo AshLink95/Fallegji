@@ -10,7 +10,7 @@
 /// }
 #[macro_export]
 macro_rules! chat {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident, $requests: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident, $requests: ident, $msg_window: ident, $msg_count: ident) => {
         let mut max_offset: u16 = 0;
         $terminal.draw(|f| {
             let size = f.area();
@@ -78,7 +78,10 @@ macro_rules! chat {
             let mode = match $vim_mode {
                 Vim::Normal => "NORMAL",
                 Vim::Insert => "INSERT",
+                Vim::Timeout => "TIMEOUT",
             };
+            // Message at the length cap → warning-red text.
+            let input_text_color = if $input.chars().count() >= $crate::messaging::MAX_MESSAGE_LEN { $config.warn_color() } else { $config.text_color };
 
             // Input Box Scrolling (TODO: make scrolling work by pushing extremes not just bottm line)
             let mut input_scroll_offset = 0usize;
@@ -108,6 +111,7 @@ macro_rules! chat {
                                 .style(Style::default().fg(match $vim_mode {
                                     Vim::Normal => $config.normal_mode,
                                     Vim::Insert => $config.insert_mode,
+                                    Vim::Timeout => $config.timeout_mode,
                                 }).bg($config.bg_color))
                         )
                         .title_bottom(
@@ -122,9 +126,9 @@ macro_rules! chat {
                         .border_type($config.border_style)
                         .style(Style::default().fg($config.border_color).bg($config.bg_color)) // box color
                 )
-                .style(Style::default().fg($config.text_color).bg($config.bg_color)); // text color
+                .style(Style::default().fg(input_text_color).bg($config.bg_color)); // text color (red at the length cap)
 
-            // Messages section (TODO: make text wrap, show multilines (with clear indicators, exp: line below user name until message end, follow text way of wrapping) add allow scrolling with a clickable sidebar) (also, make it auto scroll if we're at the bottom, namely when someone sends something)
+            // Messages section (TODO: make text wrap, show multilines (with clear indicators, exp: line below user name until message end, follow text way of wrapping) add allow scrolling with a clickable sidebar)  — autoscroll-at-bottom done (None sentinel below)
             let message_history = $chat.message_history.read().unwrap();
             let members = $chat.members.read().unwrap();
             let current_user_id = $chat.current_user.get_id();
@@ -231,7 +235,8 @@ macro_rules! chat {
         } else { false };
         // Work on a concrete offset (first draw → bottom), then persist it back into the Option.
         let mut offset = $scroll_offset.unwrap_or(max_offset);
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin, offset, max_offset);
-        $scroll_offset = Some(offset);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin, offset, max_offset, $msg_window, $msg_count);
+        // None = stick to bottom (autoscroll on new messages); Some only while scrolled up.
+        $scroll_offset = if offset >= max_offset { None } else { Some(offset) };
     };
 }

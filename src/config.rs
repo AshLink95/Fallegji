@@ -32,6 +32,9 @@ pub struct TomlConfig {
     pub insert_mode: Option<(u8, u8, u8)>,
 
     #[serde(default)]
+    pub timeout_mode: Option<(u8, u8, u8)>,
+
+    #[serde(default)]
     pub users_color: Option<(u8, u8, u8)>,
 
     #[serde(default)]
@@ -63,6 +66,7 @@ pub struct ChatConfig {
     pub border_color: Option<(u8, u8, u8)>,
     pub normal_mode: Option<(u8, u8, u8)>,
     pub insert_mode: Option<(u8, u8, u8)>,
+    pub timeout_mode: Option<(u8, u8, u8)>,
     pub users_color: Option<(u8, u8, u8)>,
     pub my_color: Option<(u8, u8, u8)>,
     pub system_color: Option<(u8, u8, u8)>,
@@ -89,6 +93,7 @@ pub struct Config {
     pub border_color: Color,
     pub normal_mode: Color,
     pub insert_mode: Color,
+    pub timeout_mode: Color,
     pub users_color: Color,
     pub my_color: Color,
     pub system_color: Color,
@@ -137,6 +142,15 @@ impl ChatChoice {
 }
 
 impl Config {
+    /// Warning color for invalid / at-limit fields and the TIMEOUT-ish states: red, but switched to
+    /// orange when the user's own color (`my_color`) is already red, so it stays distinguishable.
+    pub fn warn_color(&self) -> Color {
+        match self.my_color {
+            Color::Rgb(r, g, _) if (120..=255).contains(&r) && (0..=60).contains(&g) => Color::Rgb(255, 100, 0),
+            _ => Color::Red,
+        }
+    }
+
     pub fn load<P: AsRef<Path>>(path: P, chat_name: Option<&str>) -> Result<Self> {
         match fs::read_to_string(&path) {
             Ok(content) => {
@@ -167,6 +181,7 @@ impl Config {
             border_color: Color::DarkGray,
             normal_mode: Color::Rgb(0, 212, 255),
             insert_mode: Color::Rgb(255, 102, 204),
+            timeout_mode: Color::Rgb(255, 49, 49), // neon red
             users_color: Color::Cyan,
             my_color: Color::Green,
             system_color: Color::DarkGray,
@@ -239,6 +254,11 @@ impl Config {
                 toml.insert_mode,
                 Color::Rgb(255, 102, 204)
             ),
+            timeout_mode: get_color(
+                chat_config.map(|c| c.timeout_mode),
+                toml.timeout_mode,
+                Color::Rgb(255, 49, 49)
+            ),
             users_color: get_color(
                 chat_config.map(|c| c.users_color),
                 toml.users_color,
@@ -275,6 +295,7 @@ impl Config {
                 border_color: None,
                 normal_mode: None,
                 insert_mode: None,
+                timeout_mode: None,
                 users_color: None,
                 my_color: None,
                 system_color: None,
@@ -290,6 +311,7 @@ impl Config {
                 border_color: None,
                 normal_mode: None,
                 insert_mode: None,
+                timeout_mode: None,
                 users_color: None,
                 my_color: None,
                 system_color: None,
@@ -318,6 +340,7 @@ impl Config {
             border_color: None,
             normal_mode: None,
             insert_mode: None,
+            timeout_mode: None,
             users_color: None,
             my_color: None,
             system_color: None,
@@ -340,6 +363,7 @@ impl Config {
             border_color: toml_config.border_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),
             normal_mode: toml_config.normal_mode.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Rgb(0, 212, 255)),
             insert_mode: toml_config.insert_mode.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Rgb(255, 102, 204)),
+            timeout_mode: toml_config.timeout_mode.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Rgb(255, 49, 49)),
             users_color: toml_config.users_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Cyan),
             my_color: toml_config.my_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Green),
             system_color: toml_config.system_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),

@@ -224,6 +224,8 @@ pub async fn app() -> Result<()> {
     let mut client_resend_at = std::time::Instant::now(); // join-request resend CD
     let mut client_resend_n: usize = 0;
     let mut scroll_offset: Option<u16> = None;
+    let mut msg_window = std::time::Instant::now(); // per-minute send-rate window
+    let mut msg_count: u32 = 0;
     let mut my_addrs: Option<[SocketAddr; 2]> = None; // initMember addrs display
     // (name, ip) per up interface, refreshed each home render for the interface picker.
     let interfaces: Arc<Mutex<Vec<(String, std::net::IpAddr)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -271,7 +273,7 @@ pub async fn app() -> Result<()> {
             initMember!(terminal, curr_screen, config, rendezvous_input, anim_tick, conn, client_resend_at, client_resend_n, my_addrs);
         } else if curr_screen == Screen::Chat && let Some(ref chat) = chat
             && let Some(ref conn) = conn {
-            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y, scroll_offset, requests);
+            chat!(terminal, curr_screen, config, choice, chats, conn, chat, run_once, vim_mode, seq, input, cursor_pos, persis_y, scroll_offset, requests, msg_window, msg_count);
         }
         else {
             curr_screen = Screen::Home;

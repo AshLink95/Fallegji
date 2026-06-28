@@ -8,20 +8,26 @@ lazy_static::lazy_static! {
 
 /// Vim modes
 #[derive(PartialEq, Eq)]
-pub enum Vim { Normal, Insert, }
+pub enum Vim { Normal, Insert, Timeout, }
 
 /// Vim motions input handling
 ///
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident, $scroll_offset: ident, $max_offset: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident, $scroll_offset: ident, $max_offset: ident, $msg_window: ident, $msg_count: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
             .min(999999);
         let k = RE_CHR.find_iter(&$seq).map(|m| m.as_str()).collect::<String>();
         let k = if k.is_empty() { None } else { Some(k.as_str()) };
+        // Per-minute send window: reset the count and lift any TIMEOUT once a minute has elapsed.
+        if $msg_window.elapsed() >= std::time::Duration::from_secs(60) {
+            $msg_window = std::time::Instant::now();
+            $msg_count = 0;
+            if $vim_mode == Vim::Timeout { $vim_mode = Vim::Normal; }
+        }
         if event::poll(std::time::Duration::from_millis(100))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
@@ -39,6 +45,9 @@ macro_rules! input_handling {
                             $config = Config::load(CONFIG, None)?;
                             $run_once = true;
                         },
+                        // No blanket TIMEOUT block: typing is already gated (insert-entry needs
+                        // NORMAL, char-insert needs INSERT), so a timed-out user keeps navigation,
+                        // scrolling, and Ctrl+a (admin requests) — user wants those allowed in timeout.
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
                             $curr_screen = Screen::InitServer;
                         },
@@ -99,9 +108,12 @@ macro_rules! input_handling {
                         KeyCode::Enter => { // NOTE: Specific to this app
                             if n==0 { n = 1 };
                             for _ in 0..n.min(10) {
+                                if $vim_mode == Vim::Timeout { break; } // rate limit hit mid-burst
                                 if !$input.is_empty() {
                                     let sender_id = $chat.current_user.get_id();
                                     $chat.send_message($conn, sender_id, $input.clone()).await;
+                                    $msg_count += 1; // count toward the per-minute send cap
+                                    if $msg_count >= $crate::messaging::RATE_PER_MIN { $vim_mode = Vim::Timeout; }
                                     if $scroll_offset == $max_offset && $max_offset != 0 {
                                         $scroll_offset = $scroll_offset.saturating_add(if n!=0 {n as u16} else {1});
                                     }
@@ -112,17 +124,17 @@ macro_rules! input_handling {
                             $cursor_pos = 0;
                         },
 
-                        //Scrolling
-                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                        // Scrolling: allowed in NORMAL and TIMEOUT (not INSERT) so a timed-out user can still read history.
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode != Vim::Insert => {
                             $scroll_offset = $max_offset;
                         },
-                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode != Vim::Insert => {
                             $scroll_offset = $scroll_offset.saturating_add(1).min($max_offset);
                         },
-                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode != Vim::Insert => {
                             $scroll_offset = 0;
                         },
-                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode == Vim::Normal => {
+                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode != Vim::Insert => {
                             $scroll_offset = $scroll_offset.saturating_sub(1);
                         },
 
@@ -794,10 +806,12 @@ macro_rules! input_handling {
                             $cursor_pos += 1;
                         },
                         KeyCode::Char(c) if $vim_mode == Vim::Insert => {
-                            $input.insert($cursor_pos, c);
-                            $cursor_pos += 1;
-                            let tc = std::sync::Arc::clone($conn);
-                            tokio::spawn(async move { let _ = tc.send_typing().await; });
+                            if $input.chars().count() < $crate::messaging::MAX_MESSAGE_LEN { // cap message length
+                                $input.insert($cursor_pos, c);
+                                $cursor_pos += 1;
+                                let tc = std::sync::Arc::clone($conn);
+                                tokio::spawn(async move { let _ = tc.send_typing().await; });
+                            }
                         },
                         _ => {}
                     }

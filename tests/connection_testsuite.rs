@@ -954,6 +954,48 @@ async fn test_listen_dispatch() -> Result<()> {
     Ok(())
 }
 
+/// Anti-flood: a peer that sends more than RATE_PER_MIN messages in a minute has the excess
+/// dropped (the dispatch gates read_msg on recv_ok), so it can't overflow our history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_recv_rate_limit() -> Result<()> {
+    let chat = Arc::new(test_chat()?);
+    let (peer, _) = chat.db.create_peer(9000).await?;
+    let pubkey_hex = peer.get_pubkey().to_bytes().encode_hex::<String>();
+    let sender = chat.db.create_user(pubkey_hex, "flooder".to_string(), Uid::getuid()).await?;
+    chat.db.update_peer_link_user(peer.get_id(), sender.get_id()).await?;
+    let sid = sender.get_id();
+
+    let key = *Key::from_slice(b"0123456789abcdef0123456789abcdef");
+    let mut peermap = HashMap::new();
+    peermap.insert(sid, (peer, key, None));
+    let (_, prvkey) = Peer::keypairgen()?;
+    let socket = ephemeral().await?;
+    let addr = socket.0;
+    let conn = Arc::new(Connection::new(prvkey, free_rendezvous_addr().await, socket, peermap).await);
+
+    let lconn = Arc::clone(&conn);
+    let lslot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
+        fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new() }
+    )));
+    tokio::spawn(async move { let _ = lconn.listen(lslot, CancellationToken::new()).await; });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Blast RATE_PER_MIN + 20 *distinct* messages from this one peer in a tight burst.
+    let cap = fallegji::messaging::RATE_PER_MIN as usize;
+    let mut client = TcpStream::connect(addr).await?;
+    for i in 0..(cap + 20) {
+        let frame = Connection::encode(&key, MSG_HD, Message::new(1, sid, format!("m{i}")))?;
+        client.write_all(&(frame.len() as u32).to_be_bytes()).await?;
+        client.write_all(&frame).await?;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Only the first RATE_PER_MIN landed; the flood beyond the cap was dropped.
+    assert_eq!(chat.message_history.read().unwrap().len(), cap,
+        "received messages capped at RATE_PER_MIN; excess dropped");
+    Ok(())
+}
+
 /// End-to-end: admin accepts a joiner, then both directions of messaging must work
 /// (received into history) — reproduces the "peers don't see each other's messages" bug.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

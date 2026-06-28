@@ -23,6 +23,9 @@ const EVI_HD: u8 = 0x79;
 const OWN_HD: u8 = 0x6A;
 
 const SYNC_COOLDOWN: Duration = Duration::from_millis(1200);
+/// Max accepted frame / decompressed payload size — bounds buffer allocs and zip bombs (a large db
+/// dump still fits; anything bigger is malicious/broken).
+const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -67,6 +70,7 @@ pub struct Connection {
     rendezvous: (SocketAddr, Mutex<Option<Arc<UdpSocket>>>),
     db_sync_buf: Mutex<DbSyncBuf>,
     user: Option<(u64, String, Uid)>,
+    rcv_rate: Mutex<HashMap<(u64, u8), (Instant, u32)>>, // per-(peer, packet-type) receive rate (anti-flood)
 }
 
 /// Encryption/Decryption and Serialization/Deserialization
@@ -258,11 +262,31 @@ impl Connection {
                 msgs: LinkedList::new(), usrs: LinkedList::new(), pirs: LinkedList::new(), admin_rank: None, rcv_count: 0, first_at: None,
             }),
             user: None,
+            rcv_rate: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn set_user(&mut self, user_id: u64, name: String, uid: Uid) {
         self.user = Some((user_id, name, uid));
+    }
+
+    /// Anti-flood: per-peer, per-packet-type cap (drop the excess). Caps: messages 100/min, db
+    /// syncs 50/min, heartbeat & typing 1/sec (we only send those once a second anyway). Unlisted
+    /// headers are unlimited. Keyed by the authenticated peer_id, so spoofing sender_id can't dodge.
+    fn recv_ok(&self, peer_id: u64, header: u8) -> bool {
+        let (window, cap) = match header {
+            MSG_HD => (60, crate::messaging::RATE_PER_MIN),
+            DBS_HD | DBR_HD => (60, 50),          // db_req follows db_sync (it replies with our whole db)
+            AVP_HD | OWN_HD | KCK_HD => (60, 20),  // address relays + kick: rare control packets
+            HBT_HD | TYP_HD => (1, 1),
+            _ => return true,
+        };
+        let mut guard = self.rcv_rate.lock().unwrap();
+        let entry = guard.entry((peer_id, header)).or_insert((Instant::now(), 0));
+        if entry.0.elapsed() >= Duration::from_secs(window) { *entry = (Instant::now(), 0); }
+        if entry.1 >= cap { return false; }
+        entry.1 += 1;
+        true
     }
 
 
@@ -541,6 +565,10 @@ impl Secrecy for Connection {
         }
         let header = plaintxt.remove(0);
         if header == DBS_HD || header == NWP_HD || header == DBR_HD || header == AVP_HD {
+            // Zip-bomb guard: decompress_size_prepended trusts the prepended LE-u32 size, so cap it.
+            if plaintxt.len() >= 4 && u32::from_le_bytes(plaintxt[..4].try_into().unwrap()) as usize > MAX_FRAME {
+                return Err(anyhow::anyhow!("decompressed size exceeds cap"));
+            }
             plaintxt = decompress_size_prepended(&plaintxt)
                 .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
         }
@@ -813,6 +841,7 @@ impl Communication for Connection {
                     };
                     if read_len.is_err() { break; }
                     let len = u32::from_be_bytes(len_buf) as usize;
+                    if len > MAX_FRAME { break; } // oversized frame → drop the connection (anti-OOM)
                     let mut frame = vec![0u8; len];
                     let read_frame = tokio::select! {
                         _ = conn_token.cancelled() => break,
@@ -840,10 +869,10 @@ impl Communication for Connection {
                     let _ = match (header, chat) {
                         (NWP_HD, None) => me.accept_chat(&slot, payload).await,
                         (OWN_HD, _) => {
-                            if let Ok(addrs) = serde_json::from_slice::<[SocketAddr; 2]>(&payload) && let Some(e) = me.peers.lock().unwrap().get_mut(&peer_id) { e.0.set_addrs(addrs); }
+                            if me.recv_ok(peer_id, OWN_HD) && let Ok(addrs) = serde_json::from_slice::<[SocketAddr; 2]>(&payload) && let Some(e) = me.peers.lock().unwrap().get_mut(&peer_id) { e.0.set_addrs(addrs); }
                             Ok(())
                         }
-                        (AVP_HD, _) => {
+                        (AVP_HD, _) if me.recv_ok(peer_id, AVP_HD) => {
                             if let Ok(table) = serde_json::from_slice::<Vec<([u8; 32], [SocketAddr; 2])>>(&payload) {
                                 let me_pub = PublicKey::from(&me.prvkey).to_bytes();
                                 {
@@ -857,19 +886,22 @@ impl Communication for Connection {
                             Ok(())
                         }
                         (_, None) => Ok(()),
-                        (MSG_HD, Some(chat)) => me.read_msg(&chat, payload).await,
+                        // Each rate-limited type is gated by recv_ok (drops a flooding peer's excess).
+                        (MSG_HD, Some(chat)) => if me.recv_ok(peer_id, MSG_HD) { me.read_msg(&chat, payload).await } else { Ok(()) },
                         (HBT_HD, Some(chat)) => {
-                            if let Ok(true) = me.read_heartbeat(&chat, peer_id).await {
+                            if me.recv_ok(peer_id, HBT_HD) && let Ok(true) = me.read_heartbeat(&chat, peer_id).await {
                                 let (me2, db) = (Arc::clone(&me), chat.db.clone());
                                 tokio::spawn(async move { let _ = me2.send_db_sync(&db).await; });
                             }
                             Ok(())
                         }
-                        (TYP_HD, Some(_)) => me.read_typing(peer_id).await,
-                        (DBS_HD, Some(chat)) => me.read_db_sync(&chat, peer_id, payload).await,
-                        (DBR_HD, Some(chat)) => me.read_db_req(&chat, peer_id, payload).await,
+                        (TYP_HD, Some(_)) => if me.recv_ok(peer_id, TYP_HD) { me.read_typing(peer_id).await } else { Ok(()) },
+                        (DBS_HD, Some(chat)) => if me.recv_ok(peer_id, DBS_HD) { me.read_db_sync(&chat, peer_id, payload).await } else { Ok(()) },
+                        (DBR_HD, Some(chat)) => if me.recv_ok(peer_id, DBR_HD) { me.read_db_req(&chat, peer_id, payload).await } else { Ok(()) },
+                        // Only the admin may kick: honor KCK solely from the admin's authenticated peer_id (+ rate cap).
                         (KCK_HD, Some(chat)) => match serde_json::from_slice::<u64>(&payload) {
-                            Ok(uid) => me.read_kick(&chat, uid).await,
+                            Ok(uid) if Some(peer_id) == chat.get_admin() && me.recv_ok(peer_id, KCK_HD) => me.read_kick(&chat, uid).await,
+                            Ok(_) => Ok(()),
                             Err(e) => Err(e.into()),
                         },
                         (_, Some(_)) => Ok(()),

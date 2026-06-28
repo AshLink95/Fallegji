@@ -5,6 +5,12 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
 use crate::{auth::{Role, Uid, User}, connection::{Communication, Connection, KeyGen, Peermap}, db::Database};
 
+/// Limits. Names (user & chat) and message body are capped in chars; sends/receives are capped
+/// per minute (per local user for sends, per peer for receives — the latter is anti-flood).
+pub const MAX_NAME_LEN: usize = 32;
+pub const MAX_MESSAGE_LEN: usize = 2000;
+pub const RATE_PER_MIN: u32 = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     id: i32,
