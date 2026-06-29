@@ -12,12 +12,12 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 
 # General checklist
 - [ ] send notifications
-- [ ] draggable scroll bar (mouse)
 - [ ] allow `\` commands in-text for next 2 (post release, v2.0)
 - [ ] allow sending files
 - [ ] allow sending videostream and soundstream (allowing for vc with cam by opening a browser)
+- [ ] allow agents to use app (make a CLI, through arguments)
 
-# advanced VIM motions checklist:
+# advanced VIM motions checklist (v2.0):
 - [ ] Implement `iw`, `i(`, `aw`, `a[` and such sequences
 - [ ] Implement `f`, `F`, `t` and `T`
 - [ ] replace and replace mode

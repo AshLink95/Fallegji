@@ -12,6 +12,7 @@
 macro_rules! chat {
     ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $vim_mode: ident, $seq:ident, $input:ident, $cursor_pos:ident, $persis_y: ident, $scroll_offset: ident, $requests: ident, $msg_window: ident, $msg_count: ident) => {
         let mut max_offset: u16 = 0;
+        let mut msg_area = ratatui::layout::Rect::default(); // messages pane rect, hoisted out for mouse-drag scroll hit-testing
         $terminal.draw(|f| {
             let size = f.area();
             let box_width = size.width.saturating_sub(2);
@@ -73,7 +74,8 @@ macro_rules! chat {
                     Constraint::Length(line_count),
                 ])
                 .split(size);
-            
+            msg_area = chunks[1]; // capture the messages pane for scrollbar drag hit-testing after the closure
+
             // vim modes
             let mode = match $vim_mode {
                 Vim::Normal => "NORMAL",
@@ -235,7 +237,7 @@ macro_rules! chat {
         } else { false };
         // Work on a concrete offset (first draw → bottom), then persist it back into the Option.
         let mut offset = $scroll_offset.unwrap_or(max_offset);
-        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin, offset, max_offset, $msg_window, $msg_count);
+        input_handling!($vim_mode, $seq, $input, $cursor_pos, $persis_y, $curr_screen, $config, $chats, $conn, $chat, $run_once, is_admin, offset, max_offset, $msg_window, $msg_count, msg_area);
         // None = stick to bottom (autoscroll on new messages); Some only while scrolled up.
         $scroll_offset = if offset >= max_offset { None } else { Some(offset) };
     };

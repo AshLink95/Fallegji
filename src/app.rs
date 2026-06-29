@@ -2,7 +2,7 @@ use std::{io, net::SocketAddr, sync::{Arc, Mutex}};
 use anyhow::Result;
 use regex::Regex;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     cursor::SetCursorStyle,
@@ -182,7 +182,7 @@ pub async fn app() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?; // mouse capture: drives the draggable chat scrollbar
     let _ = execute!(
         stdout,
         PushKeyboardEnhancementFlags(
@@ -323,7 +323,7 @@ pub async fn app() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?; // release mouse capture on exit
     terminal.show_cursor()?;
 
     Ok(())

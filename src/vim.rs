@@ -15,7 +15,7 @@ pub enum Vim { Normal, Insert, Timeout, }
 /// import the following in the file using the macro:
 /// `use crossterm::event::{self, Event, KeyCode, KeyModifiers};`
 macro_rules! input_handling {
-    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident, $scroll_offset: ident, $max_offset: ident, $msg_window: ident, $msg_count: ident) => {
+    ($vim_mode: ident, $seq: ident, $input:ident, $cursor_pos:ident, $persis_y:ident, $curr_screen: ident, $config: ident, $chats: ident, $conn: ident, $chat: ident, $run_once: ident, $is_admin: ident, $scroll_offset: ident, $max_offset: ident, $msg_window: ident, $msg_count: ident, $msg_area: ident) => {
         let mut n = RE_NUM.find_iter(&$seq)
             .map(|m| m.as_str().parse::<usize>().unwrap_or(0))
             .fold(0usize, |acc, x| acc.saturating_add(x))
@@ -810,6 +810,19 @@ macro_rules! input_handling {
                         },
                         _ => {}
                     }
+                }
+            } else if let Event::Mouse(me) = event {
+                // Mouse-driven chat scroll: wheel scrolls; clicking the scrollbar column or dragging the pane jumps to that row (GUI-style).
+                use crossterm::event::{MouseEventKind, MouseButton};
+                let a = $msg_area;
+                let in_pane = a.height > 1 && me.row >= a.y && me.row < a.y + a.height;
+                let on_bar = in_pane && me.column + 1 >= a.x + a.width;
+                match me.kind {
+                    MouseEventKind::ScrollUp => $scroll_offset = $scroll_offset.saturating_sub(3),
+                    MouseEventKind::ScrollDown => $scroll_offset = ($scroll_offset + 3).min($max_offset),
+                    MouseEventKind::Down(MouseButton::Left) if on_bar => $scroll_offset = (((me.row - a.y) as usize * $max_offset as usize) / (a.height as usize - 1)).min($max_offset as usize) as u16,
+                    MouseEventKind::Drag(MouseButton::Left) if in_pane => $scroll_offset = (((me.row - a.y) as usize * $max_offset as usize) / (a.height as usize - 1)).min($max_offset as usize) as u16,
+                    _ => {}
                 }
             }
         }
