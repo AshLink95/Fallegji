@@ -11,7 +11,7 @@
 /// `use x25519_dalek::{PublicKey, StaticSecret};`
 #[macro_export]
 macro_rules! home {
-    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $chat_slot: ident, $join_keys: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident, $interfaces: ident, $iface: ident) => {
+    ($terminal:ident, $curr_screen: ident, $config: ident, $choice: ident, $chats: ident, $conn: ident, $chat: ident, $chat_slot: ident, $join_keys: ident, $active_section: ident, $active_field: ident, $chat_name_input: ident, $user_name_input: ident, $rendezvous_input: ident, $chat_2_delete:ident, $anim_tick: ident, $run_once: ident, $requests: ident, $token: ident, $interfaces: ident, $iface: ident, $error: ident) => {
         // Validity checks
         let combo_exists = !$chat_name_input.is_empty() && !$user_name_input.is_empty() &&
             $chats.available.contains(&format!("{} @ {}", $user_name_input, $chat_name_input));
@@ -271,7 +271,7 @@ macro_rules! home {
                 .style(Style::default().bg($config.bg_color));
             frame.render_widget(join_rendezvous_paragraph, lines_layout[14]);
 
-            // Interface section (active_section == -1): header + selector, Left/Right cycles it.
+            // Interface section
             let iface_active = $active_section == -1;
             let iface_label_color = if iface_active { $config.text_color } else { $config.border_color };
             let iface_header = Paragraph::new(Line::from(Span::styled("network interface", iface_label_color)))
@@ -287,6 +287,15 @@ macro_rules! home {
             frame.render_widget(iface_header, lines_layout[0]);
             frame.render_widget(Paragraph::new(iface_line).alignment(Alignment::Center).style(Style::default().bg($config.bg_color)), lines_layout[1]);
             frame.render_widget(&separator, lines_layout[2]);
+
+            // Show the last error (e.g. a rejected join) in red below the box.
+            if let Some(ref msg) = $error {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(msg.clone(), Style::default().fg(warn_color))))
+                        .alignment(Alignment::Center),
+                    vertical_chunks[3],
+                );
+            }
         })?;
 
         // Handle input
@@ -294,7 +303,8 @@ macro_rules! home {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        // Ctrl+q: signal quit via screen state — the app loop can't `break` across its async catch-block.
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => $curr_screen = Screen::Quit,
 
                         KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if $active_section == 0 {
@@ -432,7 +442,7 @@ macro_rules! home {
                                     let jc = joinstuffnew(&$user_name_input, &$rendezvous_input, iface, $token.clone(), &mut $run_once).await?;
                                     $conn = Some(jc.0);
                                     $chat_slot = Some(jc.1);
-                                    $join_keys = Some((jc.2, jc.4));
+                                    $join_keys = Some((jc.2, jc.4, jc.5));
                                     $config.user_name = Some($user_name_input.clone());
                                     $curr_screen = Screen::InitClient;
                                 }

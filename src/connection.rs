@@ -21,10 +21,9 @@ const KCK_HD: u8 = 0x97;
 const AVP_HD: u8 = 0x88;
 const EVI_HD: u8 = 0x79;
 const OWN_HD: u8 = 0x6A;
+const REJ_HD: u8 = 0x5B;
 
 const SYNC_COOLDOWN: Duration = Duration::from_millis(1200);
-/// Max accepted frame / decompressed payload size — bounds buffer allocs and zip bombs (a large db
-/// dump still fits; anything bigger is malicious/broken).
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -45,6 +44,7 @@ pub trait KeyGen {
 
 /// user_id -> peer, key, socket
 pub type Peermap = HashMap<u64, (Peer, Key, Option<Arc<TokioMutex<TcpStream>>>)>;
+type OPeermap = HashMap<[u8; 32], ([SocketAddr; 2], Option<Arc<TokioMutex<TcpStream>>>, Option<i64>, Option<i64>)>;
 
 /// Pending join requests awaiting admin accept/reject: (addrs, name, pubkey, uid).
 pub type Requests = Arc<Mutex<Vec<([SocketAddr; 2], String, PublicKey, u32)>>>;
@@ -104,7 +104,8 @@ pub trait RendezVous {
 pub trait Communication {
     /// Accept inbound connections on our bound socket and dispatch decrypted packets.
     /// Stops the accept loop and every per-connection reader when `token` is cancelled.
-    async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()>;
+    // `reject` is set when an admin sends us a REJ frame, so the app loop can bounce us Home with the reason.
+    async fn listen(self: Arc<Self>, slot: ChatSlot, reject: Arc<Mutex<Option<String>>>, token: CancellationToken) -> Result<()>;
 
     async fn send_newpeer(&self, addrs: [SocketAddr; 2], pubkey: PublicKey, name: &str, uid: u32, chat_name: &str, chat: &Chat) -> Result<()>;
 
@@ -420,15 +421,25 @@ impl Connection {
         Ok(())
     }
 
+    /// Auto-reject a would-be joiner whose username is taken: one REJ frame so their `listen` surfaces it.
+    pub async fn send_reject(&self, addrs: [SocketAddr; 2], pubkey: PublicKey, name: &str) -> Result<()> {
+        let peer = Peer { id: -1, user_id: None, addrs, pubkey, last_heartbeat: None, last_seen_typing: None };
+        let key = peer.shrdkeygen(self.prvkey.clone());
+        let rej = Connection::encode(&key, REJ_HD, format!("username '{name}' already exists in this chat"))?;
+        if let Some(mut stream) = connect_any(&addrs).await {
+            stream.write_all(&(rej.len() as u32).to_be_bytes()).await?;
+            stream.write_all(&rej).await?;
+        }
+        Ok(())
+    }
+
     /// Rebuild the peermap from the db (deriving each peer's shared key), keeping any
     /// already-open streams, and re-adding ourselves.
     pub async fn rebuild_peermap(&self, db: &Database) -> Result<()> {
         let me = self.user.as_ref().map(|(id, _, _)| *id);
         let peers = db.load_all_peers().await?;
         let mut guard = self.peers.lock().unwrap();
-        #[allow(clippy::type_complexity)]
-        let old: HashMap<[u8; 32], ([SocketAddr; 2], Option<Arc<TokioMutex<TcpStream>>>, Option<i64>, Option<i64>)> =
-            guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone(), p.get_last_heartbeat(), p.get_last_seen_typing()))).collect();
+        let old: OPeermap = guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone(), p.get_last_heartbeat(), p.get_last_seen_typing()))).collect();
         guard.clear();
         for mut peer in peers {
             let uid = match peer.get_user_id() { Some(u) => u, None => continue };
@@ -813,7 +824,7 @@ impl RendezVous for Connection {
 }
 
 impl Communication for Connection {
-    async fn listen(self: Arc<Self>, slot: ChatSlot, token: CancellationToken) -> Result<()> {
+    async fn listen(self: Arc<Self>, slot: ChatSlot, reject: Arc<Mutex<Option<String>>>, token: CancellationToken) -> Result<()> {
         let mut cooldown = tokio::time::interval(Duration::from_millis(500));
         loop {
             let listener = self.socket.lock().unwrap().1.clone();
@@ -831,6 +842,7 @@ impl Communication for Connection {
             };
             let me = Arc::clone(&self);
             let slot = Arc::clone(&slot);
+            let reject = Arc::clone(&reject);
             let conn_token = token.clone();
             tokio::spawn(async move {
                 loop {
@@ -841,7 +853,7 @@ impl Communication for Connection {
                     };
                     if read_len.is_err() { break; }
                     let len = u32::from_be_bytes(len_buf) as usize;
-                    if len > MAX_FRAME { break; } // oversized frame → drop the connection (anti-OOM)
+                    if len > MAX_FRAME { break; }
                     let mut frame = vec![0u8; len];
                     let read_frame = tokio::select! {
                         _ = conn_token.cancelled() => break,
@@ -868,6 +880,11 @@ impl Communication for Connection {
                     let chat = slot.lock().unwrap().as_ref().map(|a| a.chat.clone());
                     let _ = match (header, chat) {
                         (NWP_HD, None) => me.accept_chat(&slot, payload).await,
+                        // Admin rejected our join (e.g. duplicate username): stash the reason; the app loop bounces us Home.
+                        (REJ_HD, _) => {
+                            if let Ok(reason) = serde_json::from_slice::<String>(&payload) { *reject.lock().unwrap() = Some(reason); }
+                            Err(anyhow::anyhow!("join rejected"))
+                        }
                         (OWN_HD, _) => {
                             if me.recv_ok(peer_id, OWN_HD) && let Ok(addrs) = serde_json::from_slice::<[SocketAddr; 2]>(&payload) && let Some(e) = me.peers.lock().unwrap().get_mut(&peer_id) { e.0.set_addrs(addrs); }
                             Ok(())
@@ -886,7 +903,6 @@ impl Communication for Connection {
                             Ok(())
                         }
                         (_, None) => Ok(()),
-                        // Each rate-limited type is gated by recv_ok (drops a flooding peer's excess).
                         (MSG_HD, Some(chat)) => if me.recv_ok(peer_id, MSG_HD) { me.read_msg(&chat, payload).await } else { Ok(()) },
                         (HBT_HD, Some(chat)) => {
                             if me.recv_ok(peer_id, HBT_HD) && let Ok(true) = me.read_heartbeat(&chat, peer_id).await {
@@ -898,7 +914,6 @@ impl Communication for Connection {
                         (TYP_HD, Some(_)) => if me.recv_ok(peer_id, TYP_HD) { me.read_typing(peer_id).await } else { Ok(()) },
                         (DBS_HD, Some(chat)) => if me.recv_ok(peer_id, DBS_HD) { me.read_db_sync(&chat, peer_id, payload).await } else { Ok(()) },
                         (DBR_HD, Some(chat)) => if me.recv_ok(peer_id, DBR_HD) { me.read_db_req(&chat, peer_id, payload).await } else { Ok(()) },
-                        // Only the admin may kick: honor KCK solely from the admin's authenticated peer_id (+ rate cap).
                         (KCK_HD, Some(chat)) => match serde_json::from_slice::<u64>(&payload) {
                             Ok(uid) if Some(peer_id) == chat.get_admin() && me.recv_ok(peer_id, KCK_HD) => me.read_kick(&chat, uid).await,
                             Ok(_) => Ok(()),

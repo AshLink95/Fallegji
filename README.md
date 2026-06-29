@@ -11,10 +11,9 @@ The way this app works is by setting up a VPN tunnel for encrypted, fast TCP com
 <!-- Connection Types (P2P and group chats) -->
 
 # General checklist
-- [ ] Elegant error handling. Show red text instead of exisiting the app (ranonce doesn't always reset when back in home.rs)
-- [ ] auto rename when new user shares an existing user's name
 - [ ] send notifications
-- [ ] allow `\` commands in-text
+- [ ] draggable scroll bar (mouse)
+- [ ] allow `\` commands in-text for next 2 (post release, v2.0)
 - [ ] allow sending files
 - [ ] allow sending videostream and soundstream (allowing for vc with cam by opening a browser)
 

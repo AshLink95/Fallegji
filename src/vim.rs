@@ -43,11 +43,7 @@ macro_rules! input_handling {
                             $chats = ChatChoice::load(CONFIG)?;
                             $curr_screen = Screen::Home;
                             $config = Config::load(CONFIG, None)?;
-                            $run_once = true;
                         },
-                        // No blanket TIMEOUT block: typing is already gated (insert-entry needs
-                        // NORMAL, char-insert needs INSERT), so a timed-out user keeps navigation,
-                        // scrolling, and Ctrl+a (admin requests) — user wants those allowed in timeout.
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
                             $curr_screen = Screen::InitServer;
                         },
@@ -124,7 +120,6 @@ macro_rules! input_handling {
                             $cursor_pos = 0;
                         },
 
-                        // Scrolling: allowed in NORMAL and TIMEOUT (not INSERT) so a timed-out user can still read history.
                         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::SHIFT) && key.modifiers.contains(KeyModifiers::CONTROL) && $vim_mode != Vim::Insert => {
                             $scroll_offset = $max_offset;
                         },

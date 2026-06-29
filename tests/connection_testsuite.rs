@@ -16,6 +16,9 @@ async fn ephemeral() -> anyhow::Result<(SocketAddr, TcpListener)> {
     Ok((addr, l))
 }
 
+// Throwaway REJ sink for listen() — tests don't exercise username rejection.
+fn no_reject() -> Arc<std::sync::Mutex<Option<String>>> { Arc::new(std::sync::Mutex::new(None)) }
+
 /// RAII auto-cleanup for the file-backed test dbs ("{user}__{chat}.db"). Removing them on Drop
 /// runs even when a test panics, so a failed run can't leave stale dbs that contaminate the next.
 struct DbGuard(Vec<String>);
@@ -592,7 +595,7 @@ async fn test_probe_own_addr_direct() -> Result<()> {
     )));
     let token = CancellationToken::new();
     let lt = token.clone();
-    tokio::spawn(async move { let _ = lconn.listen(slot, lt).await; });
+    tokio::spawn(async move { let _ = lconn.listen(slot, no_reject(), lt).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // The peer (sharing the key) connects and pushes its fresh 2 IPs.
@@ -640,7 +643,7 @@ async fn test_direct_relay_remesh() -> Result<()> {
     )));
     let token = CancellationToken::new();
     { let (cb, t) = (Arc::clone(&conn_b), token.clone());
-      tokio::spawn(async move { let _ = cb.listen(slot_b, t).await; }); }
+      tokio::spawn(async move { let _ = cb.listen(slot_b, no_reject(), t).await; }); }
 
     // --- C: real socket + listen, knows A (key) and B (STALE addr, no link) ---
     let c_sock = ephemeral().await?;
@@ -660,7 +663,7 @@ async fn test_direct_relay_remesh() -> Result<()> {
         fallegji::connection::Accepted { chat: chat_c, name: String::new() }
     )));
     { let (cc, t) = (Arc::clone(&conn_c), token.clone());
-      tokio::spawn(async move { let _ = cc.listen(slot_c, t).await; }); }
+      tokio::spawn(async move { let _ = cc.listen(slot_c, no_reject(), t).await; }); }
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     // --- A connects to C and relays its table (B carries the FRESH addr) over the direct link ---
@@ -928,7 +931,7 @@ async fn test_listen_dispatch() -> Result<()> {
     let lslot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
         fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new() }
     )));
-    tokio::spawn(async move { let _ = lconn.listen(lslot, CancellationToken::new()).await; });
+    tokio::spawn(async move { let _ = lconn.listen(lslot, no_reject(), CancellationToken::new()).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Burst of frames: message, heartbeat, typing.
@@ -977,7 +980,7 @@ async fn test_recv_rate_limit() -> Result<()> {
     let lslot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
         fallegji::connection::Accepted { chat: Arc::clone(&chat), name: String::new() }
     )));
-    tokio::spawn(async move { let _ = lconn.listen(lslot, CancellationToken::new()).await; });
+    tokio::spawn(async move { let _ = lconn.listen(lslot, no_reject(), CancellationToken::new()).await; });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Blast RATE_PER_MIN + 20 *distinct* messages from this one peer in a tight burst.
@@ -1021,7 +1024,7 @@ async fn test_message_exchange() -> Result<()> {
     admin_conn.set_user(admin_user.get_id(), "admin".to_string(), Uid::from(1));
     let admin_conn = Arc::new(admin_conn);
     let admin_slot: ChatSlot = Arc::new(std::sync::Mutex::new(Some(Accepted { chat: admin_chat.clone(), name: String::new() })));
-    tokio::spawn(Arc::clone(&admin_conn).listen(admin_slot, CancellationToken::new()));
+    tokio::spawn(Arc::clone(&admin_conn).listen(admin_slot, no_reject(), CancellationToken::new()));
 
     // ---- Joiner: real socket, knows admin's key (as snd_requests would set up) + listen ----
     let joiner_sock = ephemeral().await?;
@@ -1038,7 +1041,7 @@ async fn test_message_exchange() -> Result<()> {
     joiner_conn.set_user(joiner_uid_val, "joiner".to_string(), joiner_uid);
     let joiner_conn = Arc::new(joiner_conn);
     let joiner_slot: ChatSlot = Arc::new(std::sync::Mutex::new(None));
-    tokio::spawn(Arc::clone(&joiner_conn).listen(Arc::clone(&joiner_slot), CancellationToken::new()));
+    tokio::spawn(Arc::clone(&joiner_conn).listen(Arc::clone(&joiner_slot), no_reject(), CancellationToken::new()));
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // ---- Admin accepts the joiner: NWP → joiner creates chat, syncs back ----
@@ -1116,7 +1119,7 @@ async fn rejoin(admin: &NetNode, old: NetNode, room: &str) -> Result<NetNode> {
     let token = CancellationToken::new();
     let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
         fallegji::connection::Accepted { chat: std::sync::Arc::clone(&old.chat), name: room.to_string() })));
-    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, no_reject(), token.clone()));
     conn.connect_peers().await;                                  // we dial everyone
     admin.conn.reconnect_peer(old.pubkey, [addr; 2]).await;      // admin dials us back
     Ok(NetNode { name: old.name, conn, chat: old.chat, addr, pubkey: old.pubkey, prvkey: old.prvkey, user_id: old.user_id, uid: old.uid, token })
@@ -1145,7 +1148,7 @@ async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
     let token = CancellationToken::new();
     let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(
         fallegji::connection::Accepted { chat: std::sync::Arc::clone(&chat), name: room.to_string() })));
-    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, token.clone()));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(slot, no_reject(), token.clone()));
     Ok(NetNode { name: name.into(), conn, chat, addr, pubkey, prvkey: prv, user_id: user.get_id(), uid, token })
 }
 
@@ -1165,7 +1168,7 @@ async fn net_join(admin: &NetNode, name: &str, room: &str, uid_n: u32) -> Result
     let conn = std::sync::Arc::new(conn);
     let token = CancellationToken::new();
     let slot: fallegji::connection::ChatSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
-    tokio::spawn(std::sync::Arc::clone(&conn).listen(std::sync::Arc::clone(&slot), token.clone()));
+    tokio::spawn(std::sync::Arc::clone(&conn).listen(std::sync::Arc::clone(&slot), no_reject(), token.clone()));
     tokio::time::sleep(Duration::from_millis(50)).await;
     admin.conn.send_newpeer([addr; 2], pubkey, name, uid.as_raw(), room, &admin.chat).await?;
     let mut chat = None;
