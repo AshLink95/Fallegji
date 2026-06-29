@@ -81,6 +81,7 @@ fn test_chat() -> Result<Chat> {
         members: Arc::new(std::sync::RwLock::new(HashMap::new())),
         current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
         db: Database::new(":memory:")?,
+        notify: std::sync::atomic::AtomicBool::new(true),
     })
 }
 
@@ -885,6 +886,7 @@ async fn test_send_newpeer() -> Result<()> {
         members: Arc::new(std::sync::RwLock::new(HashMap::new())),
         current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
         db,
+        notify: std::sync::atomic::AtomicBool::new(true),
     };
     let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
     conn.send_newpeer([laddr; 2], new_pub, "newbie", 7, "room", &chat).await?;
@@ -1019,6 +1021,7 @@ async fn test_message_exchange() -> Result<()> {
         members: Arc::new(std::sync::RwLock::new(std::iter::once((admin_user.get_id(), admin_user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
         current_user: admin_user.clone(),
         db: admin_db.clone(),
+        notify: std::sync::atomic::AtomicBool::new(true),
     });
     let mut admin_conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, admin_sock, HashMap::new()).await;
     admin_conn.set_user(admin_user.get_id(), "admin".to_string(), Uid::from(1));
@@ -1141,6 +1144,7 @@ async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
         members: std::sync::Arc::new(std::sync::RwLock::new(std::iter::once((user.get_id(), user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
         current_user: user.clone(),
         db,
+        notify: std::sync::atomic::AtomicBool::new(true),
     });
     let mut conn = Connection::new(prv.clone(), free_rendezvous_addr().await, (addr, l), HashMap::new()).await;
     conn.set_user(user.get_id(), name.to_string(), uid);

@@ -983,6 +983,15 @@ impl Communication for Connection {
             }
             hist.push(msg);
         }
+        // Desktop notification for a genuinely-new received message (skip system + our own); no-op if notify-send is absent.
+        if chat.should_notify() && sender_id != 0 && sender_id != chat.current_user.get_id() {
+            let who = chat.members.read().unwrap().get(&sender_id).map(|u| u.get_name()).unwrap_or_else(|| "someone".to_string());
+            let body = format!("{}: {}", who, contents);
+            let _ = std::process::Command::new("notify-send")
+                .arg("Fallegji").arg(body)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .spawn();
+        }
         tokio::spawn(async move {
             let _ = db.create_message(sender_id, contents, Some(sent_at)).await;
         });

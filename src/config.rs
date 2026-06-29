@@ -16,6 +16,9 @@ pub struct TomlConfig {
     #[serde(default = "default_max_height")]
     pub max_height: u16,
 
+    #[serde(default = "default_notifications")]
+    pub notifications: bool,
+
     #[serde(default)]
     pub bg_color: Option<(u8, u8, u8)>,
 
@@ -61,6 +64,7 @@ pub struct ChatConfig {
     // Optional overrides for cosmetic configs
     pub border_style: Option<String>,
     pub max_height: Option<u16>,
+    pub notifications: Option<bool>,
     pub bg_color: Option<(u8, u8, u8)>,
     pub text_color: Option<(u8, u8, u8)>,
     pub border_color: Option<(u8, u8, u8)>,
@@ -87,6 +91,7 @@ pub struct Config {
 
     pub border_style: BorderType,
     pub max_height: u16,
+    pub notifications: bool,
 
     pub bg_color: Color,
     pub text_color: Color,
@@ -103,6 +108,7 @@ pub struct Config {
 // Default functions for serde
 fn default_border_style() -> String { "Rounded".to_string() }
 fn default_max_height() -> u16 { 5 }
+fn default_notifications() -> bool { true } // desktop notifications on by default
 
 impl ChatChoice {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -176,6 +182,7 @@ impl Config {
             prvkey: None,
             border_style: BorderType::Rounded,
             max_height: 5,
+            notifications: true,
             bg_color: Color::Reset,
             text_color: Color::White,
             border_color: Color::DarkGray,
@@ -212,6 +219,10 @@ impl Config {
             .and_then(|c| c.max_height)
             .unwrap_or(toml.max_height);
 
+        let notifications = chat_config
+            .and_then(|c| c.notifications)
+            .unwrap_or(toml.notifications);
+
         let prvkey = chat_config
             .and_then(|c| c.prvkey.as_ref())
             .and_then(|s| decode(s).ok())
@@ -228,6 +239,7 @@ impl Config {
 
             border_style: parse_border_style(border_style_str),
             max_height,
+            notifications,
 
             bg_color: get_color(
                 chat_config.map(|c| c.bg_color),
@@ -290,6 +302,7 @@ impl Config {
             toml::from_str(&content).unwrap_or_else(|_| TomlConfig {
                 border_style: default_border_style(),
                 max_height: default_max_height(),
+                notifications: default_notifications(),
                 bg_color: None,
                 text_color: None,
                 border_color: None,
@@ -306,6 +319,7 @@ impl Config {
             TomlConfig {
                 border_style: default_border_style(),
                 max_height: default_max_height(),
+                notifications: default_notifications(),
                 bg_color: None,
                 text_color: None,
                 border_color: None,
@@ -335,6 +349,7 @@ impl Config {
             prvkey: Some(encode(prvkey.as_bytes())),
             border_style: None, // Don't save cosmetic overrides by default
             max_height: None,
+            notifications: None,
             bg_color: None,
             text_color: None,
             border_color: None,
@@ -358,6 +373,7 @@ impl Config {
             prvkey: Some(prvkey),
             border_style: parse_border_style(&toml_config.border_style),
             max_height: toml_config.max_height,
+            notifications: toml_config.notifications,
             bg_color: toml_config.bg_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::Reset),
             text_color: toml_config.text_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::White),
             border_color: toml_config.border_color.map(|(r, g, b)| Color::Rgb(r, g, b)).unwrap_or(Color::DarkGray),

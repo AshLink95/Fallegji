@@ -241,6 +241,7 @@ pub async fn app() -> Result<()> {
     #[allow(clippy::collapsible_match)]
     loop {
         let step: Result<()> = async {
+        if let Some(c) = &chat { c.set_notify(config.notifications); }
         if let (Some(ch), Some(cn)) = (&chat, &conn) {
             let dups: Vec<_> = {
                 let members = ch.members.read().unwrap();

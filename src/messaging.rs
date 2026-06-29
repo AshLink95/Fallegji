@@ -1,12 +1,10 @@
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, sync::atomic::AtomicBool};
 use anyhow::Result;
 use tokio::sync::Mutex as TokioMutex;
 use x25519_dalek::{PublicKey, StaticSecret};
 use time::OffsetDateTime;
 use crate::{auth::{Role, Uid, User}, connection::{Communication, Connection, KeyGen, Peermap}, db::Database};
 
-/// Limits. Names (user & chat) and message body are capped in chars; sends/receives are capped
-/// per minute (per local user for sends, per peer for receives — the latter is anti-flood).
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_MESSAGE_LEN: usize = 2000;
 pub const RATE_PER_MIN: u32 = 100;
@@ -23,12 +21,12 @@ pub struct Chat {
     pub message_history: Arc<RwLock<Vec<Message>>>,
     pub members: Arc<RwLock<HashMap<u64, User>>>, // user_id -> User
     pub current_user: User,
-    pub db: Database
+    pub db: Database,
+    pub notify: AtomicBool,
 }
 
 impl Message {
     pub fn new(id: i32, sender_id: u64, contents: String) -> Self {
-        // Nanos so repeated identical sends stay distinct (the dedup keys on sent_at).
         let sent_at = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
         Self { id, sender_id, contents, sent_at }
     }
@@ -77,15 +75,14 @@ impl Chat {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
             current_user,
-            db
+            db,
+            notify: AtomicBool::new(true),
         }, prvkey, pubkey, user_id, peer_id, peermap))
     }
-    /// Non-admin joiner: build the chat from the admin's DB dump (carried by the NWP on
-    /// accept), registering ourselves into it. Returns the chat + our peer id.
     pub async fn join(chat_name: &str, user_name: &str, prvkey: &StaticSecret, uid: Uid, port: u16, db_bytes: Vec<u8>) -> Result<Self> {
         let db_path = format!("{}__{}.db", user_name, chat_name);
         let db = Database::new(&db_path)?;
-        db.load(db_bytes).await?; // adopt the admin's DB
+        db.load(db_bytes).await?;
 
         let pubkey = PublicKey::from(prvkey);
         let pubkey_hex = hex::encode(pubkey.as_bytes());
@@ -107,7 +104,8 @@ impl Chat {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
             current_user,
-            db
+            db,
+            notify: AtomicBool::new(true),
         })
     }
 
@@ -150,7 +148,8 @@ impl Chat {
             message_history: Arc::new(RwLock::new(message_history)),
             members: Arc::new(RwLock::new(members)),
             current_user,
-            db
+            db,
+            notify: AtomicBool::new(true),
         }, peersmap))
     }
 
@@ -174,17 +173,10 @@ impl Chat {
         self.send_message(conn, 0, format!("{} joined the chat", user_name)).await;
     }
 
-    /// Admin kick: drop the peer from the db (peer + user), the members list, and the
-    /// connection's peermap (rebuilt from the db), then post a "<name> kicked out" system
-    /// message and sync. (Additive sync can re-merge the record until proper delete-sync; the
-    /// disconnect is immediate. delete_user is best-effort — their messages' FK may block it.)
     pub async fn kick(&self, conn: &Connection, user_id: u64) {
         let name = self.members.read().unwrap().get(&user_id).map(|u| u.get_name()).unwrap_or_default();
-        // The peermap's peer often carries id -1; the real rowid lives in the db.
         let peer_db_id = self.db.load_all_peers().await.ok()
             .and_then(|ps| ps.into_iter().find(|p| p.get_user_id() == Some(user_id)).map(|p| p.get_id()));
-        // Announce the kick to all peers first (while the kicked peer's stream still exists for
-        // the others), then drop them locally. send_kick makes every receiver delete in real time.
         self.send_message(conn, 0, format!("{} has been kicked out", name)).await;
         let _ = conn.send_kick(user_id).await;
         self.members.write().unwrap().remove(&user_id);
@@ -192,4 +184,7 @@ impl Chat {
         let _ = self.db.delete_user(user_id).await;
         let _ = conn.rebuild_peermap(&self.db).await;
     }
+
+    pub fn set_notify(&self, on: bool) { self.notify.store(on, std::sync::atomic::Ordering::Relaxed); }
+    pub fn should_notify(&self) -> bool { self.notify.load(std::sync::atomic::Ordering::Relaxed) }
 }
