@@ -1,9 +1,9 @@
-<!-- ![](assets/banner.gif) -->
+![](assets/banner.gif)
 ![Rust](https://img.shields.io/badge/rust-1.95.0-orange?logo=rust&logoColor=white)
 
-<div align="center">
-  <img width="270" height="330" src="assets/logo.gif" alt="Fallegji" width="200">
-</div>
+<!-- <div align="center"> -->
+<!--   <img width="270" height="330" src="assets/logo.gif" alt="Fallegji" width="200"> -->
+<!-- </div> -->
 
 Fallegji is a terminal-based P2P group chat app written in Rust. It's inspired by the Fallegha of north Africa who were responsible for the armed resistance against colonialism and operated in total secrecy. This app features:
 - **Zero-server and fully decentralized:** No servers, no accounts, no intermediaries — every peer is a first-class node in a direct, full-mesh network, with no central point to seize, subpoena, or shut down.
@@ -29,7 +29,7 @@ Run the tests with `cargo test -- --test-threads=2` (the networked ones dislike 
 
 ## Use
 
-<!-- <video width="640" height="480" controls> -->
+<!-- <video width=100% controls> -->
 <!--   <source src="assets/demo.mp4" type="video/mp4"> -->
 <!-- </video> -->
 https://github.com/user-attachments/assets/dac36b8c-bee0-426c-8f70-eb83dc226e51
