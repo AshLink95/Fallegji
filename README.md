@@ -31,7 +31,7 @@ Run the tests with `cargo test -- --test-threads=2` (the networked ones dislike 
 <!-- <video width="640" height="480" controls> -->
 <!--   <source src="assets/demo.mp4" type="video/mp4"> -->
 <!-- </video> -->
-<video src="httpsUse://github.com/AshLink95/Fallegji/main/demo.mp4" controls width="80%">
+<video src="httpsUse://github.com/AshLink95/Fallegji/raw/main/demo.mp4" controls width="80%">
 
 No server or accounts in the conventional sense. Peers talk directly over encrypted TCP, finding each other through a rendezvous address, typically a peer's IP address with a free port of choice.
 
