@@ -437,35 +437,53 @@ impl Connection {
     /// already-open streams, and re-adding ourselves.
     pub async fn rebuild_peermap(&self, db: &Database) -> Result<()> {
         let me = self.user.as_ref().map(|(id, _, _)| *id);
+        let own = self.current_addrs(); // to spot a peer now sitting entirely on our own addrs (a takeover)
+        let placeholder = [SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0); 2]; // dead, un-dialable
         let peers = db.load_all_peers().await?;
-        let mut guard = self.peers.lock().unwrap();
-        let old: OPeermap = guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone(), p.get_last_heartbeat(), p.get_last_seen_typing()))).collect();
-        guard.clear();
-        for mut peer in peers {
-            let uid = match peer.get_user_id() { Some(u) => u, None => continue };
-            if Some(uid) == me { continue; }
-            let key = peer.shrdkeygen(self.prvkey.clone());
-            let prev = old.get(&peer.get_pubkey().to_bytes());
-            let stream = match prev {
-                Some((old_addrs, s, _, _)) if *old_addrs == peer.get_addrs() => s.clone(),
-                _ => None,
-            };
-            if let Some((_, _, hb, typ)) = prev { peer.set_last_heartbeat(*hb); peer.set_last_seen_typing(*typ); }
-            guard.insert(uid, (peer, key, stream));
+        let mut swapped: Vec<i32> = Vec::new();
+        {
+            let mut guard = self.peers.lock().unwrap();
+            let old: OPeermap = guard.values().map(|(p, _, s)| (p.get_pubkey().to_bytes(), (p.get_addrs(), s.clone(), p.get_last_heartbeat(), p.get_last_seen_typing()))).collect();
+            guard.clear();
+            for mut peer in peers {
+                let uid = match peer.get_user_id() { Some(u) => u, None => continue };
+                if Some(uid) == me { continue; }
+                let key = peer.shrdkeygen(self.prvkey.clone());
+                // Takeover: we bound a port this (now-gone) peer used to hold, so ALL its addrs are ours; dialing
+                // it self-loops → it ghost-registers online/typing. Swap to a dead placeholder (no stream/hb),
+                // then persist + AVP-broadcast (below) so the whole roster stops pointing the peer at us.
+                if peer.get_addrs().iter().all(|a| own.contains(a)) {
+                    if peer.get_id() >= 0 { swapped.push(peer.get_id()); }
+                    peer.set_addrs(placeholder);
+                    peer.set_last_heartbeat(None);
+                    peer.set_last_seen_typing(None);
+                    guard.insert(uid, (peer, key, None));
+                    continue;
+                }
+                let prev = old.get(&peer.get_pubkey().to_bytes());
+                let stream = match prev {
+                    Some((old_addrs, s, _, _)) if *old_addrs == peer.get_addrs() => s.clone(),
+                    _ => None,
+                };
+                if let Some((_, _, hb, typ)) = prev { peer.set_last_heartbeat(*hb); peer.set_last_seen_typing(*typ); }
+                guard.insert(uid, (peer, key, stream));
+            }
+            if let Some(my_id) = me {
+                let me_pub = PublicKey::from(&self.prvkey);
+                let my_addrs = old.get(&me_pub.to_bytes()).map(|(a, _, _, _)| *a).unwrap_or_else(|| {
+                    let a = self.socket.lock().unwrap().0;
+                    [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a]
+                });
+                let me_peer = Peer {
+                    id: -1, user_id: Some(my_id), addrs: my_addrs,
+                    pubkey: me_pub, last_heartbeat: None, last_seen_typing: None
+                };
+                let me_key = me_peer.shrdkeygen(self.prvkey.clone());
+                guard.insert(my_id, (me_peer, me_key, old.get(&me_pub.to_bytes()).and_then(|(_, s, _, _)| s.clone())));
+            }
         }
-        if let Some(my_id) = me {
-            let me_pub = PublicKey::from(&self.prvkey);
-            let my_addrs = old.get(&me_pub.to_bytes()).map(|(a, _, _, _)| *a).unwrap_or_else(|| {
-                let a = self.socket.lock().unwrap().0;
-                [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), a.port()), a]
-            });
-            let me_peer = Peer {
-                id: -1, user_id: Some(my_id), addrs: my_addrs,
-                pubkey: me_pub, last_heartbeat: None, last_seen_typing: None
-            };
-            let me_key = me_peer.shrdkeygen(self.prvkey.clone());
-            guard.insert(my_id, (me_peer, me_key, old.get(&me_pub.to_bytes()).and_then(|(_, s, _, _)| s.clone())));
-        }
+        for id in &swapped { let _ = db.update_peer_addrs(*id, placeholder).await; }
+        if !swapped.is_empty() { self.broadcast_peer_table().await; }
         Ok(())
     }
 
@@ -520,7 +538,7 @@ impl Connection {
             .map(|(_, (p, _, _))| (p.get_pubkey().to_bytes(), p.get_addrs())).collect();
         table.push((PublicKey::from(&self.prvkey).to_bytes(), own));
         for (uid, addrs) in to_dial {
-            let dialable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| !own.contains(a)).collect();
+            let dialable: Vec<SocketAddr> = addrs.iter().copied().filter(|a| !own.contains(a) && !a.ip().is_unspecified()).collect();
             if dialable.is_empty() { continue; }
             if let Some(stream) = connect_any(&dialable).await {
                 let arc = Arc::new(TokioMutex::new(stream));
@@ -983,14 +1001,10 @@ impl Communication for Connection {
             }
             hist.push(msg);
         }
-        // Desktop notification for a genuinely-new received message (skip system + our own); no-op if notify-send is absent.
         if chat.should_notify() && sender_id != 0 && sender_id != chat.current_user.get_id() {
             let who = chat.members.read().unwrap().get(&sender_id).map(|u| u.get_name()).unwrap_or_else(|| "someone".to_string());
             let body = format!("{}: {}", who, contents);
-            let _ = std::process::Command::new("notify-send")
-                .arg("Fallegji").arg(body)
-                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-                .spawn();
+            tokio::task::spawn_blocking(move || { let _ = notify_rust::Notification::new().summary("Fallegji").body(&body).show(); });
         }
         tokio::spawn(async move {
             let _ = db.create_message(sender_id, contents, Some(sent_at)).await;
@@ -1383,7 +1397,8 @@ impl Communication for Connection {
     }
 }
 
-//TODO: put these functions in some connection impl
+
+// Helpers (Big Laude was naughty)
 
 /// Fill `out` with every up non-loopback IPv4 interface as (name, ip) — feeds the home-screen
 /// interface picker. Cross-platform via if-addrs (getifaddrs on Unix, GetAdaptersAddresses on

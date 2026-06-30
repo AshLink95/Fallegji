@@ -171,12 +171,12 @@ lazy_static::lazy_static! {
 
 
 pub async fn app() -> Result<()> {
-    // Config file (TODO: change to `~/.fallgejirc` for linux in prod)
-    // share dir (TODO: change to `~/.local/share/fallgeji` for linux in prod)
-    static CONFIG: &str = "fallegji.toml";
-    static SHARE: &str = ".";
-    let mut chats = ChatChoice::load(CONFIG)?;
-    let mut config = Config::load(CONFIG, None)?;
+    crate::config::init_dirs()?;
+    let _ = std::env::set_current_dir(crate::config::data_dir());
+    static CONFIG: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::config::config_file_path);
+    static SHARE: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::config::data_dir);
+    let mut chats = ChatChoice::load(CONFIG.as_str())?;
+    let mut config = Config::load(CONFIG.as_str(), None)?;
     let mut choice = String::from("");
 
     // Setup terminal
@@ -293,9 +293,9 @@ pub async fn app() -> Result<()> {
             if let Some((acc_chat, acc_name)) = accepted {
                 choice = acc_name.clone();
                 if let Some((prvkey, user_id, _)) = join_keys.take() {
-                    config = Config::save(CONFIG, &acc_name, &user_name_input, &rendezvous_input, user_id, prvkey)?;
+                    config = Config::save(CONFIG.as_str(), &acc_name, &user_name_input, &rendezvous_input, user_id, prvkey)?;
                 }
-                chats = ChatChoice::load(CONFIG)?;
+                chats = ChatChoice::load(CONFIG.as_str())?;
                 chat = Some(acc_chat);
                 curr_screen = Screen::Chat;
                 my_addrs = None;

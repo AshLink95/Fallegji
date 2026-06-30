@@ -42,7 +42,7 @@ impl Message {
 
 impl Chat {
     pub async fn new(chat_name: &str, user_name: &str, port: u16) -> Result<(Self, StaticSecret, PublicKey, u64, i32, Peermap)> {
-        let db_path = format!("{}__{}.db", user_name, chat_name);
+        let db_path = format!("{}__{}.db", user_name, chat_name); // cwd-relative; app() chdirs into the data dir in prod
         let db = Database::new(&db_path)?;
 
         let (mut peer, prvkey) = db.create_peer(port).await?;
@@ -80,7 +80,7 @@ impl Chat {
         }, prvkey, pubkey, user_id, peer_id, peermap))
     }
     pub async fn join(chat_name: &str, user_name: &str, prvkey: &StaticSecret, uid: Uid, port: u16, db_bytes: Vec<u8>) -> Result<Self> {
-        let db_path = format!("{}__{}.db", user_name, chat_name);
+        let db_path = format!("{}__{}.db", user_name, chat_name); // cwd-relative; app() chdirs into the data dir in prod
         let db = Database::new(&db_path)?;
         db.load(db_bytes).await?;
 
@@ -110,7 +110,7 @@ impl Chat {
     }
 
     pub async fn old(chat_name: &str, user_name: &str, prvkey: StaticSecret) -> Result<(Self, Peermap)> {
-        let db_path = format!("{}__{}.db", user_name, chat_name);
+        let db_path = format!("{}__{}.db", user_name, chat_name); // cwd-relative; app() chdirs into the data dir in prod
         let db = Database::new(&db_path)?;
         let message_history = db.load_all_messages().await?;
         let all_users = db.load_all_users().await?;

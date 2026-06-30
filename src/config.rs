@@ -108,7 +108,35 @@ pub struct Config {
 // Default functions for serde
 fn default_border_style() -> String { "Rounded".to_string() }
 fn default_max_height() -> u16 { 5 }
-fn default_notifications() -> bool { true } // desktop notifications on by default
+fn default_notifications() -> bool { true }
+
+#[cfg(unix)]
+fn base_dirs() -> (String, String) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    (
+        std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{home}/.config")),
+        std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share")),
+    )
+}
+#[cfg(windows)]
+fn base_dirs() -> (String, String) {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| appdata.clone());
+    (appdata, local)
+}
+
+pub fn config_dir() -> String { format!("{}/fallegji", base_dirs().0) }
+pub fn data_dir() -> String { format!("{}/fallegji", base_dirs().1) }
+pub fn config_file_path() -> String { format!("{}/fallegji.toml", config_dir()) }
+
+/// Create both dirs and the config file
+pub fn init_dirs() -> Result<()> {
+    fs::create_dir_all(config_dir())?;
+    fs::create_dir_all(data_dir())?;
+    let cfg = config_file_path();
+    if !Path::new(&cfg).exists() { fs::write(&cfg, "")?; }
+    Ok(())
+}
 
 impl ChatChoice {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {

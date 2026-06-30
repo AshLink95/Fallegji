@@ -303,7 +303,6 @@ macro_rules! home {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        // Ctrl+q: signal quit via screen state — the app loop can't `break` across its async catch-block.
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => $curr_screen = Screen::Quit,
 
                         KeyCode::Char('k') if $active_section == 0 || key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -389,7 +388,7 @@ macro_rules! home {
                                 $chat_2_delete = None;
                                 $conn = None;
                                 $chat = None;
-                                $chats.delete(CONFIG, SHARE);
+                                $chats.delete(CONFIG.as_str(), SHARE.as_str());
                             } else {
                                 $chat_2_delete = Some($chats.choice);
                             }
@@ -399,7 +398,7 @@ macro_rules! home {
                         }
                         KeyCode::Enter if $active_section == 0 => {
                             if let Some(chosen) = $chats.available.get($chats.choice) {
-                                $config = Config::load(CONFIG, Some(chosen))?;
+                                $config = Config::load(CONFIG.as_str(), Some(chosen))?;
                                 $choice = chosen.split(" @ ").last().unwrap_or(chosen.as_str()).to_string();
                                 let user_name = $config.user_name.clone().unwrap_or_default();
                                 let users = Database::new(&format!("{}__{}.db", user_name, $choice))?.load_all_users().await?;
@@ -428,7 +427,7 @@ macro_rules! home {
                                     $chat = Some(ccpu.1);
                                     let prvkey = ccpu.2;
                                     let user_id = ccpu.4;
-                                    $config = Config::save(CONFIG, &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, prvkey)?;
+                                    $config = Config::save(CONFIG.as_str(), &$chat_name_input, &$user_name_input, &$rendezvous_input, user_id, prvkey)?;
                                     $curr_screen = Screen::InitServer;
                                 }
                                 _ => {}

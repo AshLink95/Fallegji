@@ -41,7 +41,7 @@ async fn mem_chat() -> Result<(Chat, u64)> {
         members: Arc::new(RwLock::new(members)),
         current_user: user,
         db,
-        notify: std::sync::atomic::AtomicBool::new(true),
+        notify: std::sync::atomic::AtomicBool::new(false), // no desktop popups during tests
     };
     Ok((chat, uid))
 }

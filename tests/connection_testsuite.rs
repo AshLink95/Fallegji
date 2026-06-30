@@ -81,7 +81,7 @@ fn test_chat() -> Result<Chat> {
         members: Arc::new(std::sync::RwLock::new(HashMap::new())),
         current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
         db: Database::new(":memory:")?,
-        notify: std::sync::atomic::AtomicBool::new(true),
+        notify: std::sync::atomic::AtomicBool::new(false), // no desktop popups during tests
     })
 }
 
@@ -886,7 +886,7 @@ async fn test_send_newpeer() -> Result<()> {
         members: Arc::new(std::sync::RwLock::new(HashMap::new())),
         current_user: User::new("dead".to_string(), "me".to_string(), Uid::from(1)),
         db,
-        notify: std::sync::atomic::AtomicBool::new(true),
+        notify: std::sync::atomic::AtomicBool::new(false), // no desktop popups during tests
     };
     let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
     conn.send_newpeer([laddr; 2], new_pub, "newbie", 7, "room", &chat).await?;
@@ -1021,7 +1021,7 @@ async fn test_message_exchange() -> Result<()> {
         members: Arc::new(std::sync::RwLock::new(std::iter::once((admin_user.get_id(), admin_user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
         current_user: admin_user.clone(),
         db: admin_db.clone(),
-        notify: std::sync::atomic::AtomicBool::new(true),
+        notify: std::sync::atomic::AtomicBool::new(false), // no desktop popups during tests
     });
     let mut admin_conn = Connection::new(admin_prv.clone(), free_rendezvous_addr().await, admin_sock, HashMap::new()).await;
     admin_conn.set_user(admin_user.get_id(), "admin".to_string(), Uid::from(1));
@@ -1057,7 +1057,7 @@ async fn test_message_exchange() -> Result<()> {
     // Poll (tolerant of scheduling under parallel load) for the joiner's chat to be born.
     let mut joiner_chat = None;
     for _ in 0..60 {
-        if let Some(c) = joiner_slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { joiner_chat = Some(c); break; }
+        if let Some(c) = joiner_slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { c.set_notify(false); joiner_chat = Some(c); break; }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let joiner_chat = joiner_chat.expect("joiner chat created");
@@ -1144,7 +1144,7 @@ async fn net_admin(name: &str, room: &str) -> Result<NetNode> {
         members: std::sync::Arc::new(std::sync::RwLock::new(std::iter::once((user.get_id(), user.clone())).chain(std::iter::once((0u64, User::sys()))).collect())),
         current_user: user.clone(),
         db,
-        notify: std::sync::atomic::AtomicBool::new(true),
+        notify: std::sync::atomic::AtomicBool::new(false), // no desktop popups during tests
     });
     let mut conn = Connection::new(prv.clone(), free_rendezvous_addr().await, (addr, l), HashMap::new()).await;
     conn.set_user(user.get_id(), name.to_string(), uid);
@@ -1177,7 +1177,7 @@ async fn net_join(admin: &NetNode, name: &str, room: &str, uid_n: u32) -> Result
     admin.conn.send_newpeer([addr; 2], pubkey, name, uid.as_raw(), room, &admin.chat).await?;
     let mut chat = None;
     for _ in 0..100 {
-        if let Some(c) = slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { chat = Some(c); break; }
+        if let Some(c) = slot.lock().unwrap().as_ref().map(|a| a.chat.clone()) { c.set_notify(false); chat = Some(c); break; }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     let chat = chat.ok_or_else(|| anyhow::anyhow!("{name} not accepted"))?;

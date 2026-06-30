@@ -476,7 +476,7 @@ macro_rules! initMember {
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             execute!(io::stdout(), SetCursorStyle::SteadyBlock);
                             $curr_screen = Screen::Home;
-                            $config = Config::load(CONFIG, None)?;
+                            $config = Config::load(CONFIG.as_str(), None)?;
                         },
                         KeyCode::Enter => {
                             let now = std::time::Instant::now();

@@ -40,9 +40,9 @@ macro_rules! input_handling {
                             $cursor_pos = 0;
                             $vim_mode = Vim::Normal;
                             execute!(io::stdout(), SetCursorStyle::SteadyBlock);
-                            $chats = ChatChoice::load(CONFIG)?;
+                            $chats = ChatChoice::load(CONFIG.as_str())?;
                             $curr_screen = Screen::Home;
-                            $config = Config::load(CONFIG, None)?;
+                            $config = Config::load(CONFIG.as_str(), None)?;
                         },
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && $is_admin => { //NOTE: Specific to this app
                             $curr_screen = Screen::InitServer;
