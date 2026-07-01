@@ -28,13 +28,14 @@ macro_rules! initAdmin {
 
             // TUI screen separation
             let me = $chat.current_user.get_id();
-            let peers: Vec<(String, std::net::SocketAddr, bool, Option<i64>)> = {
+            let peers: Vec<(String, String, bool, Option<i64>)> = {
                 let members = $chat.members.read().unwrap();
                 $conn.peer_list().into_iter()
                     .filter(|(uid, _)| *uid != me)
                     .map(|(uid, p)| {
+                        let addr = format!("{} / {}", p.get_addrs()[0], p.get_addrs()[1]);
                         let name = members.get(&uid).map(|u| u.get_name()).unwrap_or_else(|| "UNKNOWN".to_string());
-                        (name, p.get_addrs()[0], p.is_online(), p.get_last_heartbeat())
+                        (name, addr, p.is_online(), p.get_last_heartbeat())
                     })
                     .collect()
             };
@@ -170,7 +171,7 @@ macro_rules! initAdmin {
                     let text_req_color = if $active_section == 1 { $config.users_color } else { $config.border_color };
                     let name_text = Paragraph::new(format!("{}", name))
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
-                    let addr_text = Paragraph::new(format!("{}", addr[0])) // reachable (post-NAT) addr
+                    let addr_text = Paragraph::new(format!("{} / {}", addr[0], addr[1]))
                         .style(Style::default().fg(text_req_color).bg($config.bg_color));
 
                     let accept_active = row_active && $active_row;
